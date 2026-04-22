@@ -83,6 +83,14 @@ struct CompanionPanelView: View {
                     .padding(.horizontal, 16)
             }
 
+            if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
+                Spacer()
+                    .frame(height: 12)
+
+                developerSection
+                    .padding(.horizontal, 16)
+            }
+
             Spacer()
                 .frame(height: 12)
 
@@ -96,6 +104,101 @@ struct CompanionPanelView: View {
         }
         .frame(width: 320)
         .background(panelBackground)
+    }
+
+    // MARK: - Developer (bring-your-own-key)
+
+    /// Collapsible section for developers building TipTour from source
+    /// who don't want to deploy their own Cloudflare Worker. Paste a
+    /// Gemini API key here and the app uses it directly via Keychain
+    /// instead of hitting the Worker's /gemini-live-key endpoint.
+    /// Hidden behind a disclosure so the shipped DMG doesn't invite
+    /// end-users to paste keys they don't need.
+    @State private var isDeveloperSectionExpanded: Bool = false
+    @State private var developerGeminiKeyInput: String = ""
+    @State private var developerKeyStatus: String = ""
+
+    private var developerSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isDeveloperSectionExpanded.toggle()
+                }
+                if isDeveloperSectionExpanded {
+                    developerGeminiKeyInput = KeychainStore.geminiAPIKey ?? ""
+                    developerKeyStatus = ""
+                }
+            }) {
+                HStack(spacing: 8) {
+                    Image(systemName: "hammer")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .frame(width: 16)
+                    Text("Developer")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                    Spacer()
+                    Image(systemName: isDeveloperSectionExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(DS.Colors.textTertiary)
+                }
+                .padding(.vertical, 4)
+            }
+            .buttonStyle(.plain)
+            .pointerCursor()
+
+            if isDeveloperSectionExpanded {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Bring your own Gemini key")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .padding(.top, 8)
+
+                    Text("For source builds. Paste a Gemini API key and TipTour uses it directly instead of the Cloudflare Worker proxy. Stored in macOS Keychain, never synced.")
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    SecureField("AIzaSy...", text: $developerGeminiKeyInput)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11, design: .monospaced))
+
+                    HStack(spacing: 6) {
+                        Button("Save") {
+                            KeychainStore.geminiAPIKey = developerGeminiKeyInput
+                            developerKeyStatus = "Saved"
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .pointerCursor()
+                        .disabled(developerGeminiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                        Button("Clear") {
+                            developerGeminiKeyInput = ""
+                            KeychainStore.geminiAPIKey = nil
+                            developerKeyStatus = "Cleared"
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .pointerCursor()
+
+                        Text(developerKeyStatus)
+                            .font(.system(size: 10))
+                            .foregroundColor(DS.Colors.textTertiary)
+
+                        Spacer()
+
+                        Link(destination: URL(string: "https://aistudio.google.com/apikey")!) {
+                            Text("Get a key ↗")
+                                .font(.system(size: 10))
+                                .foregroundColor(DS.Colors.accent)
+                        }
+                        .pointerCursor()
+                    }
+                }
+                .padding(.bottom, 6)
+            }
+        }
     }
 
     // MARK: - Header

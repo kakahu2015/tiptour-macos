@@ -466,7 +466,20 @@ final class GeminiLiveSession: ObservableObject {
 
     // MARK: - API Key Fetch
 
+    /// Resolve the Gemini API key. Two modes:
+    ///   1. Bring-your-own-key (source-build flow): user has pasted a
+    ///      key into the panel's Developer section; it's stored in
+    ///      Keychain. We return it directly and never hit the Worker.
+    ///   2. Worker proxy (shipped-DMG flow): no user-provided key, so
+    ///      we GET /gemini-live-key on the hardcoded Worker URL, which
+    ///      returns the key from the Worker's secret store.
     private func fetchAPIKey() async throws -> String {
+        if let userKey = KeychainStore.geminiAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !userKey.isEmpty {
+            print("[GeminiLiveSession] Using Gemini API key from Keychain (bring-your-own-key mode)")
+            return userKey
+        }
+
         var request = URLRequest(url: apiKeyURL)
         request.httpMethod = "GET"
         request.timeoutInterval = 10
@@ -476,7 +489,7 @@ final class GeminiLiveSession: ObservableObject {
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
             throw NSError(domain: "GeminiLiveSession", code: -10,
-                          userInfo: [NSLocalizedDescriptionKey: "Failed to fetch Gemini API key"])
+                          userInfo: [NSLocalizedDescriptionKey: "Failed to fetch Gemini API key from Worker (\(apiKeyURL.absoluteString)). For source builds, paste a key in the panel's Developer section instead."])
         }
 
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

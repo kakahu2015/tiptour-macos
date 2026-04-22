@@ -95,48 +95,21 @@ See [AGENTS.md](AGENTS.md) for the deeper technical tour.
 
 TipTour uses Google's Gemini Live API (voice + vision + tool calling in one stream). Create a free key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — click "Create API key", copy the string that starts with `AIzaSy...`. Free-tier quota is plenty for personal use; set a hard budget cap in Google Cloud if you're worried about abuse.
 
-### 2. Cloudflare Worker (API key proxy)
-
-The app never calls Gemini directly — it fetches the key from a Cloudflare Worker you deploy. This keeps the key out of the app bundle. The Worker code is in [`worker/`](worker/).
-
-```bash
-cd worker
-npm install
-```
-
-**For local development** (the default — app expects the Worker at `http://localhost:8787`):
-
-Create `worker/.dev.vars` (gitignored):
-```
-GEMINI_API_KEY=AIzaSy...your-key-here
-```
-
-Start the Worker locally:
-```bash
-npx wrangler dev
-```
-
-Leave it running in a terminal tab while you use the app.
-
-**For deployment** to your own Cloudflare account (so the app works without a local Worker process):
-
-```bash
-npx wrangler login
-npx wrangler secret put GEMINI_API_KEY    # paste your key when prompted
-npx wrangler deploy
-```
-
-Wrangler will print your Worker's URL (e.g. `https://tiptour-worker.your-account.workers.dev`). Copy it — you'll need it in the next step.
-
-Then update `workerBaseURL` in [`TipTour/CompanionManager.swift`](TipTour/CompanionManager.swift) (search for `workerBaseURL`) from the default `http://localhost:8787` to your deployed URL. Rebuild the app.
-
-### 3. Open + run
+### 2. Open + run
 
 ```bash
 open tiptour-macos.xcodeproj
 ```
 
 Set your signing team in Target → Signing & Capabilities, then `Cmd+R`. TipTour appears in your menu bar — no dock icon, no main window.
+
+### 3. Paste your Gemini key
+
+Click the TipTour icon → expand the **Developer** section at the bottom of the panel → paste your key → **Save**. Stored in macOS Keychain, never synced.
+
+That's it. No Node, no Cloudflare account, no Worker deployment. The app reads the key directly when opening a Gemini Live session.
+
+> **For distribution** (shipping a signed DMG to non-technical users), see [`worker/`](worker/) — that's the API-key proxy path that lets you ship the app without asking end-users for a key. Not needed for local development.
 
 ### 4. Grant permissions
 
