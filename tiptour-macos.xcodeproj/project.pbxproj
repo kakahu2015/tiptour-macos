@@ -30,8 +30,8 @@
 
 /* Begin PBXFileReference section */
 		28F22CBF2F56440300A0FC59 /* Clicky.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Clicky.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		28F22CCC2F56440300A0FC59 /* leanring-buddyTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "leanring-buddyTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
-		28F22CD62F56440300A0FC59 /* leanring-buddyUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "leanring-buddyUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		28F22CCC2F56440300A0FC59 /* tiptour-macosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "tiptour-macosTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		28F22CD62F56440300A0FC59 /* tiptour-macosUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "tiptour-macosUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -93,8 +93,8 @@
 			isa = PBXGroup;
 			children = (
 				28F22CBF2F56440300A0FC59 /* Clicky.app */,
-				28F22CCC2F56440300A0FC59 /* leanring-buddyTests.xctest */,
-				28F22CD62F56440300A0FC59 /* leanring-buddyUITests.xctest */,
+				28F22CCC2F56440300A0FC59 /* tiptour-macosTests.xctest */,
+				28F22CD62F56440300A0FC59 /* tiptour-macosUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -102,9 +102,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		28F22CBE2F56440300A0FC59 /* leanring-buddy */ = {
+		28F22CBE2F56440300A0FC59 /* tiptour-macos */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 28F22CE02F56440300A0FC59 /* Build configuration list for PBXNativeTarget "leanring-buddy" */;
+			buildConfigurationList = 28F22CE02F56440300A0FC59 /* Build configuration list for PBXNativeTarget "tiptour-macos" */;
 			buildPhases = (
 				28F22CBB2F56440300A0FC59 /* Sources */,
 				28F22CBC2F56440300A0FC59 /* Frameworks */,
@@ -117,7 +117,7 @@
 			fileSystemSynchronizedGroups = (
 				28F22CC12F56440300A0FC59 /* leanring-buddy */,
 			);
-			name = "leanring-buddy";
+			name = "tiptour-macos";
 			packageProductDependencies = (
 				AA00BB022F6500020039DA55 /* Sparkle */,
 				AA00BB052F6500050039DA55 /* PostHog */,
@@ -126,9 +126,9 @@
 			productReference = 28F22CBF2F56440300A0FC59 /* Clicky.app */;
 			productType = "com.apple.product-type.application";
 		};
-		28F22CCB2F56440300A0FC59 /* leanring-buddyTests */ = {
+		28F22CCB2F56440300A0FC59 /* tiptour-macosTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 28F22CE32F56440300A0FC59 /* Build configuration list for PBXNativeTarget "leanring-buddyTests" */;
+			buildConfigurationList = 28F22CE32F56440300A0FC59 /* Build configuration list for PBXNativeTarget "tiptour-macosTests" */;
 			buildPhases = (
 				28F22CC82F56440300A0FC59 /* Sources */,
 				28F22CC92F56440300A0FC59 /* Frameworks */,
@@ -142,16 +142,16 @@
 			fileSystemSynchronizedGroups = (
 				28F22CCF2F56440300A0FC59 /* leanring-buddyTests */,
 			);
-			name = "leanring-buddyTests";
+			name = "tiptour-macosTests";
 			packageProductDependencies = (
 			);
 			productName = "leanring-buddyTests";
-			productReference = 28F22CCC2F56440300A0FC59 /* leanring-buddyTests.xctest */;
+			productReference = 28F22CCC2F56440300A0FC59 /* tiptour-macosTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
-		28F22CD52F56440300A0FC59 /* leanring-buddyUITests */ = {
+		28F22CD52F56440300A0FC59 /* tiptour-macosUITests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 28F22CE62F56440300A0FC59 /* Build configuration list for PBXNativeTarget "leanring-buddyUITests" */;
+			buildConfigurationList = 28F22CE62F56440300A0FC59 /* Build configuration list for PBXNativeTarget "tiptour-macosUITests" */;
 			buildPhases = (
 				28F22CD22F56440300A0FC59 /* Sources */,
 				28F22CD32F56440300A0FC59 /* Frameworks */,
@@ -165,11 +165,11 @@
 			fileSystemSynchronizedGroups = (
 				28F22CD92F56440300A0FC59 /* leanring-buddyUITests */,
 			);
-			name = "leanring-buddyUITests";
+			name = "tiptour-macosUITests";
 			packageProductDependencies = (
 			);
 			productName = "leanring-buddyUITests";
-			productReference = 28F22CD62F56440300A0FC59 /* leanring-buddyUITests.xctest */;
+			productReference = 28F22CD62F56440300A0FC59 /* tiptour-macosUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 /* End PBXNativeTarget section */
@@ -195,7 +195,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 28F22CBA2F56440300A0FC59 /* Build configuration list for PBXProject "leanring-buddy" */;
+			buildConfigurationList = 28F22CBA2F56440300A0FC59 /* Build configuration list for PBXProject "tiptour-macos" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -213,9 +213,9 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				28F22CBE2F56440300A0FC59 /* leanring-buddy */,
-				28F22CCB2F56440300A0FC59 /* leanring-buddyTests */,
-				28F22CD52F56440300A0FC59 /* leanring-buddyUITests */,
+				28F22CBE2F56440300A0FC59 /* tiptour-macos */,
+				28F22CCB2F56440300A0FC59 /* tiptour-macosTests */,
+				28F22CD52F56440300A0FC59 /* tiptour-macosUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -271,12 +271,12 @@
 /* Begin PBXTargetDependency section */
 		28F22CCE2F56440300A0FC59 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 28F22CBE2F56440300A0FC59 /* leanring-buddy */;
+			target = 28F22CBE2F56440300A0FC59 /* tiptour-macos */;
 			targetProxy = 28F22CCD2F56440300A0FC59 /* PBXContainerItemProxy */;
 		};
 		28F22CD82F56440300A0FC59 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 28F22CBE2F56440300A0FC59 /* leanring-buddy */;
+			target = 28F22CBE2F56440300A0FC59 /* tiptour-macos */;
 			targetProxy = 28F22CD72F56440300A0FC59 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
@@ -419,7 +419,6 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "leanring-buddy/Info.plist";
-				INFOPLIST_KEY_AnthropicAPIKey = "***REVOKED-ANTHROPIC-KEY-REMOVED-FROM-HISTORY***";
 				INFOPLIST_KEY_AnthropicAPIURL = "https://api.anthropic.com/v1/messages";
 				INFOPLIST_KEY_AnthropicModel = "claude-sonnet-4-6";
 				INFOPLIST_KEY_CFBundleDisplayName = Clicky;
@@ -460,7 +459,6 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "leanring-buddy/Info.plist";
-				INFOPLIST_KEY_AnthropicAPIKey = "***REVOKED-ANTHROPIC-KEY-REMOVED-FROM-HISTORY***";
 				INFOPLIST_KEY_AnthropicAPIURL = "https://api.anthropic.com/v1/messages";
 				INFOPLIST_KEY_AnthropicModel = "claude-sonnet-4-6";
 				INFOPLIST_KEY_CFBundleDisplayName = Clicky;
@@ -501,7 +499,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/leanring-buddy.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/leanring-buddy";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/tiptour-macos.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/tiptour-macos";
 			};
 			name = Debug;
 		};
@@ -522,7 +520,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/leanring-buddy.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/leanring-buddy";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/tiptour-macos.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/tiptour-macos";
 			};
 			name = Release;
 		};
@@ -567,7 +565,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		28F22CBA2F56440300A0FC59 /* Build configuration list for PBXProject "leanring-buddy" */ = {
+		28F22CBA2F56440300A0FC59 /* Build configuration list for PBXProject "tiptour-macos" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				28F22CDE2F56440300A0FC59 /* Debug */,
@@ -576,7 +574,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		28F22CE02F56440300A0FC59 /* Build configuration list for PBXNativeTarget "leanring-buddy" */ = {
+		28F22CE02F56440300A0FC59 /* Build configuration list for PBXNativeTarget "tiptour-macos" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				28F22CE12F56440300A0FC59 /* Debug */,
@@ -585,7 +583,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		28F22CE32F56440300A0FC59 /* Build configuration list for PBXNativeTarget "leanring-buddyTests" */ = {
+		28F22CE32F56440300A0FC59 /* Build configuration list for PBXNativeTarget "tiptour-macosTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				28F22CE42F56440300A0FC59 /* Debug */,
@@ -594,7 +592,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		28F22CE62F56440300A0FC59 /* Build configuration list for PBXNativeTarget "leanring-buddyUITests" */ = {
+		28F22CE62F56440300A0FC59 /* Build configuration list for PBXNativeTarget "tiptour-macosUITests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				28F22CE72F56440300A0FC59 /* Debug */,
