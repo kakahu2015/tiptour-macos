@@ -5,3 +5,9 @@ DerivedData/
 worker/.dev.vars
 worker/.wrangler/
 *.xcuserstate
+
+# release.sh artifacts — large, regenerated each release, never source
+build/
+releases/
+*.xcarchive/
+*.dmg

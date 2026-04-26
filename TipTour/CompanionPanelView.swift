@@ -320,10 +320,16 @@ struct CompanionPanelView: View {
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(DS.Colors.textSecondary)
 
-                Text("A side project I made for fun to help me learn stuff as I use my computer.")
+                Text("A side project I made to help me learn stuff as I use my computer.")
                     .font(.system(size: 11))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                Text("Grant the three permissions below to get started — each one explains what it's for.")
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 2)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -410,21 +416,44 @@ struct CompanionPanelView: View {
                 screenContentPermissionRow
             }
 
+            // Trust footer — appears once any permission is still
+            // missing, so the user sees the privacy story BEFORE they
+            // start clicking Grant. Suppressed once everything is on.
+            if !companionManager.allPermissionsGranted {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "lock.shield")
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .padding(.top, 1)
+                    Text("Everything stays on your Mac. Screenshots and audio are only sent to Gemini when you hold ⌃⌥ to talk.")
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.top, 8)
+            }
         }
     }
 
     private var accessibilityPermissionRow: some View {
         let isGranted = companionManager.hasAccessibilityPermission
-        return HStack {
-            HStack(spacing: 8) {
+        return HStack(alignment: .top) {
+            HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "hand.raised")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
                     .frame(width: 16)
+                    .padding(.top, 1)
 
-                Text("Accessibility")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Accessibility")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                    Text("So I can move the cursor and read what's on screen.")
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             Spacer()
@@ -498,8 +527,8 @@ struct CompanionPanelView: View {
                         .foregroundColor(DS.Colors.textSecondary)
 
                     Text(isGranted
-                         ? "Only takes a screenshot when you use the hotkey"
-                         : "Quit and reopen after granting")
+                         ? "So I can see your screen when you ask for help."
+                         : "Quit and reopen after granting.")
                         .font(.system(size: 10))
                         .foregroundColor(DS.Colors.textTertiary)
                 }
@@ -542,16 +571,23 @@ struct CompanionPanelView: View {
 
     private var screenContentPermissionRow: some View {
         let isGranted = companionManager.hasScreenContentPermission
-        return HStack {
-            HStack(spacing: 8) {
+        return HStack(alignment: .top) {
+            HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "eye")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
                     .frame(width: 16)
+                    .padding(.top, 1)
 
-                Text("Screen Content")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Screen Content")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                    Text("Lets me read the screen continuously without picking a window each time. Apple makes us re-confirm this monthly.")
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             Spacer()
@@ -588,16 +624,23 @@ struct CompanionPanelView: View {
 
     private var microphonePermissionRow: some View {
         let isGranted = companionManager.hasMicrophonePermission
-        return HStack {
-            HStack(spacing: 8) {
+        return HStack(alignment: .top) {
+            HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "mic")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
                     .frame(width: 16)
+                    .padding(.top, 1)
 
-                Text("Microphone")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Microphone")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                    Text("So you can hold ⌃⌥ and talk to me.")
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             Spacer()

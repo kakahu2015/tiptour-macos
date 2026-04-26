@@ -5,10 +5,8 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>TipTour uses your microphone so you can talk to it</string>
+	<string>TipTour uses your microphone so you can talk to it.</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>TipTour needs screen recording access to see your screen and help you.</string>
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>TipTour uses speech recognition to transcribe your voice when you talk to it</string>
+	<string>TipTour needs screen recording access to see what's on your screen and point at the right elements.</string>
 </dict>
 </plist>

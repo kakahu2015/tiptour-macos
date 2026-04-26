@@ -19,7 +19,14 @@ struct AppleSpeechTranscriptionProviderError: LocalizedError {
 
 final class AppleSpeechTranscriptionProvider: BuddyTranscriptionProvider {
     let displayName = "Apple Speech"
-    let requiresSpeechRecognitionPermission = true
+    // Set to false because TipTour ships exclusively on Gemini Live —
+    // Gemini does STT in-stream, so this legacy provider never runs in
+    // shipped builds. Returning false here removes the OS prompt for
+    // Speech Recognition during onboarding (one fewer permission
+    // dialog the user sees). If you ever re-enable the Apple Speech
+    // path, flip this back to true AND restore NSSpeechRecognitionUsageDescription
+    // in the project's INFOPLIST_KEY_* settings.
+    let requiresSpeechRecognitionPermission = false
     let isConfigured = true
     let unavailableExplanation: String? = nil
 
