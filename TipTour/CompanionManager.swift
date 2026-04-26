@@ -211,10 +211,28 @@ final class CompanionManager: ObservableObject {
         let app = raw["app"] as? String ?? "Blender"
         let rawSteps = raw["steps"] as? [[String: Any]] ?? []
 
+        // Mirror TutorialGuideGenerator's parser: read end_timestamp
+        // when present, otherwise backfill with next step's timestamp,
+        // leaving 0 for the last step (= "play to end of video").
+        let rawTimestamps: [Double] = rawSteps.map { dict in
+            dict["timestamp"] as? Double ?? 0
+        }
+        let rawEndTimestamps: [Double] = rawSteps.enumerated().map { i, dict in
+            if let provided = dict["end_timestamp"] as? Double, provided > 0 {
+                return provided
+            }
+            let nextIndex = i + 1
+            if nextIndex < rawTimestamps.count {
+                return rawTimestamps[nextIndex]
+            }
+            return 0
+        }
+
         let steps: [TutorialStep] = rawSteps.enumerated().map { i, dict in
             TutorialStep(
                 id: "step-\(i+1)",
-                timestamp: dict["timestamp"] as? Double ?? 0,
+                timestamp: rawTimestamps[i],
+                endTimestamp: rawEndTimestamps[i],
                 action: dict["action"] as? String ?? "click",
                 element: dict["element"] as? String ?? "",
                 elementRole: dict["element_role"] as? String,

@@ -3,7 +3,20 @@ import Foundation
 /// A single step in a tutorial guide
 struct TutorialStep: Codable, Identifiable {
     let id: String
+
+    /// Where this step begins in the source video (seconds).
+    /// The runtime starts the SHOW phase by seeking here and playing.
     let timestamp: Double
+
+    /// Where this step ends in the source video (seconds). Once the
+    /// playhead crosses this, the runtime auto-pauses and enters the
+    /// WAIT phase — user reads the hint, performs the action in their
+    /// app at their own pace, then presses the next-step hotkey to
+    /// move on. If endTimestamp is `0` or `<= timestamp` we treat it
+    /// as "play to end of video" — useful for the last step or when
+    /// the model can't infer a clean ending.
+    let endTimestamp: Double
+
     let action: String
     let element: String
     let elementRole: String?
@@ -11,9 +24,17 @@ struct TutorialStep: Codable, Identifiable {
     let narration: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, timestamp, action, element
+        case id, timestamp
+        case endTimestamp = "end_timestamp"
+        case action, element
         case elementRole = "element_role"
         case hint, narration
+    }
+
+    /// Convenience for the runtime — true when this step's end
+    /// boundary should be treated as "play through to the end."
+    var isOpenEnded: Bool {
+        endTimestamp <= timestamp
     }
 }
 
@@ -191,7 +212,8 @@ class TutorialGuideGenerator {
         \(clippedTranscript)
 
         For each action the user performs, output:
-        - timestamp (seconds)
+        - timestamp (seconds): when the creator BEGINS demonstrating this action
+        - end_timestamp (seconds): when the creator FINISHES demonstrating this action and moves on. Usually equal to the NEXT step's timestamp. For the very last step in the tutorial, set end_timestamp to 0 (the runtime treats 0 as "play to end of video").
         - action: "click", "type", "drag", "scroll", or "observe"
         - element: the UI element name
         - element_role: the type ("menu_bar_item", "menu_item", "button", "text_field", "toolbar_button", etc.)
@@ -199,13 +221,14 @@ class TutorialGuideGenerator {
         - narration: what the narrator says
 
         Output ONLY valid JSON:
-        {"title": "...", "app": "...", "steps": [{"timestamp": 42, "action": "click", "element": "Filter", "element_role": "menu_bar_item", "hint": "Click Filter menu", "narration": "..."}]}
+        {"title": "...", "app": "...", "steps": [{"timestamp": 42, "end_timestamp": 47, "action": "click", "element": "Filter", "element_role": "menu_bar_item", "hint": "Click Filter menu", "narration": "..."}]}
 
         Rules:
         - Include EVERY click, menu selection, keyboard shortcut, tool selection
         - Be precise about element names
         - For nested menus, make each level a SEPARATE step
         - Skip narration-only moments
+        - end_timestamp MUST be >= timestamp. Two adjacent steps should have step[i+1].timestamp == step[i].end_timestamp (i.e. no gaps).
         - Output raw JSON only, no markdown
         """
 
@@ -265,10 +288,32 @@ class TutorialGuideGenerator {
         let app = parsed["app"] as? String ?? "Unknown"
         let rawSteps = parsed["steps"] as? [[String: Any]] ?? []
 
+        // First pass: read each step's timestamp + endTimestamp from the
+        // raw dict. The model SHOULD emit end_timestamp, but old models
+        // and partially-cached responses may not — so we backfill with
+        // the next step's timestamp where missing. Last step with no
+        // end_timestamp is left as 0, which the runtime interprets as
+        // "play to end of video."
+        let rawTimestamps: [Double] = rawSteps.map { dict in
+            dict["timestamp"] as? Double ?? 0
+        }
+        let rawEndTimestamps: [Double] = rawSteps.enumerated().map { index, dict in
+            if let provided = dict["end_timestamp"] as? Double, provided > 0 {
+                return provided
+            }
+            // Backfill: end of step i = start of step i+1 (if any).
+            let nextIndex = index + 1
+            if nextIndex < rawTimestamps.count {
+                return rawTimestamps[nextIndex]
+            }
+            return 0  // sentinel for "until end of video"
+        }
+
         let steps: [TutorialStep] = rawSteps.enumerated().map { index, dict in
             TutorialStep(
                 id: "step-\(index + 1)",
-                timestamp: dict["timestamp"] as? Double ?? 0,
+                timestamp: rawTimestamps[index],
+                endTimestamp: rawEndTimestamps[index],
                 action: dict["action"] as? String ?? "click",
                 element: dict["element"] as? String ?? "",
                 elementRole: dict["element_role"] as? String,
