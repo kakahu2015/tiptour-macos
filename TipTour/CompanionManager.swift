@@ -316,15 +316,16 @@ final class CompanionManager: ObservableObject {
         await MainActor.run { self.isTutorialInstructionLoading = true }
         defer { Task { @MainActor in self.isTutorialInstructionLoading = false } }
 
-        // Capture the user's actual screen so Gemini can identify
-        // visible elements to point at. Best-effort.
-        let screenshotBase64: String? = await {
-            guard let captures = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG(),
-                  let first = captures.first(where: { $0.isCursorScreen }) ?? captures.first else {
-                return nil
-            }
-            return first.imageData.base64EncodedString()
+        // Capture the user's actual screen ONCE — used for both
+        // Gemini's chunk processing AND the cursor-pointing
+        // ElementResolver call below. Without a real CompanionScreenCapture
+        // the resolver can't run YOLO fallback, so this is the only
+        // way the cursor pointing actually works in tutorial mode.
+        let cursorScreenCapture: CompanionScreenCapture? = await {
+            guard let captures = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG() else { return nil }
+            return captures.first(where: { $0.isCursorScreen }) ?? captures.first
         }()
+        let screenshotBase64 = cursorScreenCapture?.imageData.base64EncodedString()
 
         guard let url = URL(string: "\(Self.workerBaseURL)/tutorial-chunk") else { return }
         var request = URLRequest(url: url)
@@ -358,6 +359,7 @@ final class CompanionManager: ObservableObject {
                 return
             }
             let elementLabel = parsed["elementLabel"] as? String
+            print("[Tutorial] gemini → instruction=\"\(instruction)\" elementLabel=\(elementLabel ?? "<nil>")")
 
             await MainActor.run {
                 // Only apply if we're still in the .instruction phase
@@ -368,12 +370,14 @@ final class CompanionManager: ObservableObject {
                 self.tutorialInstructionText = instruction
 
                 // Point the cursor at the element if Gemini gave us a
-                // confident label. Reuses the same resolution cascade
-                // (AX → YOLO → semantic fallback) the voice-mode
-                // point_at_element handler uses.
+                // confident label. Pass the screenshot capture we just
+                // took so YOLO can fall back when AX misses, and pass
+                // the user's actual frontmost app's name as the
+                // targetAppHint so the AX walk doesn't get pointed at
+                // TipTour's own pinned panel.
                 if let elementLabel = elementLabel,
                    !elementLabel.trimmingCharacters(in: .whitespaces).isEmpty {
-                    self.pointTutorialCursorAt(label: elementLabel)
+                    self.pointTutorialCursorAt(label: elementLabel, capture: cursorScreenCapture)
                 }
             }
         } catch {
@@ -385,19 +389,36 @@ final class CompanionManager: ObservableObject {
     /// cursor there. Same pipeline used by voice mode's
     /// point_at_element tool — AX tree first, YOLO next, raw LLM
     /// coords as last resort. Quiet on failure (just prints).
-    private func pointTutorialCursorAt(label: String) {
-        Task { [weak self] in
+    private func pointTutorialCursorAt(label: String, capture: CompanionScreenCapture?) {
+        // Determine which app the AX walk should target. While a
+        // tutorial is running the menu bar panel is pinned and
+        // visible, so NSWorkspace.frontmostApplication often returns
+        // TipTour itself. Fall back to userTargetAppOverride (the
+        // continuous tracker maintained by AccessibilityTreeResolver
+        // that ignores TipTour's own activations).
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        let isTipTourFrontmost = frontmost?.bundleIdentifier == Bundle.main.bundleIdentifier
+        let targetAppHint: String? = {
+            if isTipTourFrontmost {
+                return AccessibilityTreeResolver.userTargetAppOverride?.localizedName
+            }
+            return frontmost?.localizedName
+        }()
+        print("[Tutorial] pointTutorialCursorAt(label=\"\(label)\") targetApp=\(targetAppHint ?? "<nil>") hasCapture=\(capture != nil)")
+
+        Task { [weak self, capture, targetAppHint] in
             guard let self = self else { return }
             let resolution = await ElementResolver.shared.resolve(
                 label: label,
                 llmHintInScreenshotPixels: nil,
-                latestCapture: nil
+                latestCapture: capture,
+                targetAppHint: targetAppHint
             )
             guard let resolution = resolution else {
-                print("[Tutorial] couldn't resolve \"\(label)\"")
+                print("[Tutorial] ✗ couldn't resolve \"\(label)\"")
                 return
             }
-            print("[Tutorial] ✓ pointing at \"\(label)\" via \(resolution.source)")
+            print("[Tutorial] ✓ pointing at \"\(label)\" via \(resolution.source) → \(resolution.globalScreenPoint)")
             await MainActor.run {
                 self.pointAtResolution(resolution)
             }
