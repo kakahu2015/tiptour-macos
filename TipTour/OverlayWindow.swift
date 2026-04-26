@@ -247,7 +247,7 @@ struct BlueCursorView: View {
             }
 
             // Tutorial video chip — only rendered in cursor-following
-            // mode (PiP mode uses TutorialVideoPanelManager's floating
+            // mode (menuBar mode embeds the video inside the menu bar
             // panel and leaves this branch unrendered). The embed is
             // a WKWebView so we DO want hit-testing on it (so YouTube
             // controls work) — that's why this branch is gated by

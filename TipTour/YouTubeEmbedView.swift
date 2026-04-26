@@ -8,8 +8,9 @@
 //  YouTube's TOS, and don't need yt-dlp installed on the user's Mac).
 //
 //  Two surfaces consume this view:
-//    1. TutorialVideoPanelManager — a draggable PiP NSPanel that floats
-//       in a corner of the screen (default tutorial mode).
+//    1. The menu bar panel (CompanionPanelView) — embedded video +
+//       step controls inside the menu bar dropdown (default mode).
+//       Panel auto-pins for the duration of the tutorial.
 //    2. OverlayWindow — a chip that follows the cursor, used when the
 //       user prefers the cursor-following layout.
 //

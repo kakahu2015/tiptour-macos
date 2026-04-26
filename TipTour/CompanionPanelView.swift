@@ -10,6 +10,16 @@
 import AVFoundation
 import SwiftUI
 
+/// Safe array subscript — returns nil instead of crashing when the
+/// index is out of range. Used in the tutorial player section where
+/// `tutorialStepIndex` could briefly fall outside the steps array
+/// during state transitions.
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
 struct CompanionPanelView: View {
     @ObservedObject var companionManager: CompanionManager
     @ObservedObject private var workflowRunner: WorkflowRunner = .shared
@@ -1212,12 +1222,123 @@ struct CompanionPanelView: View {
             }
 
             tutorialVideoModeToggleRow
+
+            // Embedded YouTube player + step controls. Only rendered
+            // when a tutorial is actually running AND the user picked
+            // menuBar mode. In cursorFollowing mode the video chip
+            // appears next to the cursor in the OverlayWindow instead.
+            if companionManager.isTutorialActive
+                && companionManager.tutorialVideoMode == .menuBar,
+                let embedController = companionManager.tutorialEmbedController,
+                let videoID = companionManager.activeTutorialVideoID {
+                embeddedTutorialPlayerSection(
+                    videoID: videoID,
+                    controller: embedController
+                )
+            }
         }
     }
 
+    /// Compact tutorial player rendered inside the menu bar panel:
+    /// 16:9 YouTube embed on top, step text + ⟲/▶/▶▶ controls below.
+    /// All state comes from CompanionManager so the same controls
+    /// work whether the user clicked them or used the global
+    /// ⌃⌥+arrow / ⌃⌥+space / ⌃⌥+esc hotkeys.
+    private func embeddedTutorialPlayerSection(
+        videoID: String,
+        controller: YouTubeEmbedController
+    ) -> some View {
+        let totalSteps = companionManager.activeTutorial?.steps.count ?? 0
+        let currentStepDisplay = companionManager.tutorialStepIndex + 1
+        let currentStep = companionManager.activeTutorial?.steps[safe: companionManager.tutorialStepIndex]
+
+        return VStack(alignment: .leading, spacing: 8) {
+            YouTubeEmbedView(videoID: videoID, controller: controller)
+                .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
+                )
+
+            HStack(spacing: 6) {
+                Text("Step \(currentStepDisplay) of \(totalSteps)")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundColor(DS.Colors.textTertiary)
+                Text(companionManager.tutorialPhase == .showing ? "▶ playing" : "⏸ waiting")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(DS.Colors.textTertiary.opacity(0.8))
+                Spacer()
+            }
+
+            if let hint = currentStep?.hint, !hint.isEmpty {
+                Text(hint)
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 6) {
+                tutorialControlButton(systemImage: "backward.fill", label: "Back", isEnabled: companionManager.tutorialStepIndex > 0) {
+                    companionManager.previousTutorialStep()
+                }
+                tutorialControlButton(systemImage: companionManager.tutorialPhase == .showing ? "pause.fill" : "play.fill", label: companionManager.tutorialPhase == .showing ? "Pause" : "Play", isEnabled: true) {
+                    companionManager.togglePlayPause()
+                }
+                tutorialControlButton(systemImage: "forward.fill", label: "Next", isEnabled: currentStepDisplay < totalSteps) {
+                    companionManager.advanceTutorial()
+                }
+                Spacer()
+                tutorialControlButton(systemImage: "stop.fill", label: "Stop", isEnabled: true, isDestructive: true) {
+                    companionManager.stopTutorial()
+                }
+            }
+
+            Text("⌃⌥ + ← / → to step  ·  ⌃⌥ + space to pause  ·  ⌃⌥ + esc to stop")
+                .font(.system(size: 9))
+                .foregroundColor(DS.Colors.textTertiary.opacity(0.7))
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.white.opacity(0.03))
+        )
+    }
+
+    private func tutorialControlButton(
+        systemImage: String,
+        label: String,
+        isEnabled: Bool,
+        isDestructive: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 9, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .foregroundColor(isDestructive ? .red.opacity(0.85) : (isEnabled ? DS.Colors.textPrimary : DS.Colors.textTertiary.opacity(0.5)))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.white.opacity(isEnabled ? 0.06 : 0.02))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .disabled(!isEnabled)
+    }
+
     /// Lets the user pick where the tutorial's YouTube video plays:
-    /// in a corner PiP panel (default, classic) or in a chip that
-    /// follows the cursor (matches the original Clicky-era pattern).
+    /// embedded in this menu bar panel (default), or in a chip that
+    /// follows the cursor.
     private var tutorialVideoModeToggleRow: some View {
         HStack(spacing: 6) {
             Image(systemName: "rectangle.on.rectangle")
@@ -1231,7 +1352,7 @@ struct CompanionPanelView: View {
             Spacer()
 
             HStack(spacing: 0) {
-                tutorialVideoModeOptionButton(label: "PiP", mode: .pip)
+                tutorialVideoModeOptionButton(label: "Menu Bar", mode: .menuBar)
                 tutorialVideoModeOptionButton(label: "Cursor", mode: .cursorFollowing)
             }
             .background(
