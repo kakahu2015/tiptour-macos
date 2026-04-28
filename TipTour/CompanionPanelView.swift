@@ -48,10 +48,6 @@ struct CompanionPanelView: View {
                 Spacer().frame(height: 14)
                 nekoModeToggleRow
                     .padding(.horizontal, 16)
-
-                Spacer().frame(height: 12)
-                developerSection
-                    .padding(.horizontal, 16)
             }
 
             Spacer().frame(height: 12)
@@ -683,95 +679,6 @@ struct CompanionPanelView: View {
 
     // MARK: - Developer (bring-your-own-key)
 
-    /// Collapsible section for source builds. Paste a Gemini API key and
-    /// the app uses it directly via Keychain instead of hitting the Worker.
-    @State private var isDeveloperSectionExpanded: Bool = false
-    @State private var developerGeminiKeyInput: String = ""
-    @State private var developerKeyStatus: String = ""
-
-    private var developerSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Button(action: {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    isDeveloperSectionExpanded.toggle()
-                }
-                if isDeveloperSectionExpanded {
-                    developerGeminiKeyInput = KeychainStore.geminiAPIKey ?? ""
-                    developerKeyStatus = ""
-                }
-            }) {
-                HStack(spacing: 8) {
-                    Image(systemName: "hammer")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(DS.Colors.textTertiary)
-                        .frame(width: 16)
-                    Text("Developer")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(DS.Colors.textSecondary)
-                    Spacer()
-                    Image(systemName: isDeveloperSectionExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(DS.Colors.textTertiary)
-                }
-                .padding(.vertical, 4)
-            }
-            .buttonStyle(.plain)
-            .pointerCursor()
-
-            if isDeveloperSectionExpanded {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Bring your own Gemini key")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(DS.Colors.textSecondary)
-                        .padding(.top, 8)
-
-                    Text("For source builds. Paste a Gemini API key and TipTour uses it directly instead of the Cloudflare Worker proxy. Stored in macOS Keychain, never synced.")
-                        .font(.system(size: 10))
-                        .foregroundColor(DS.Colors.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    SecureField("AIzaSy...", text: $developerGeminiKeyInput)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 11, design: .monospaced))
-
-                    HStack(spacing: 6) {
-                        Button("Save") {
-                            KeychainStore.geminiAPIKey = developerGeminiKeyInput
-                            developerKeyStatus = "Saved"
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .pointerCursor()
-                        .disabled(developerGeminiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                        Button("Clear") {
-                            developerGeminiKeyInput = ""
-                            KeychainStore.geminiAPIKey = nil
-                            developerKeyStatus = "Cleared"
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .pointerCursor()
-
-                        Text(developerKeyStatus)
-                            .font(.system(size: 10))
-                            .foregroundColor(DS.Colors.textTertiary)
-
-                        Spacer()
-
-                        Link(destination: URL(string: "https://aistudio.google.com/apikey")!) {
-                            Text("Get a key ↗")
-                                .font(.system(size: 10))
-                                .foregroundColor(DS.Colors.accent)
-                        }
-                        .pointerCursor()
-                    }
-                }
-                .padding(.bottom, 6)
-            }
-        }
-    }
-
     // MARK: - Footer
 
     private var feedbackButton: some View {
@@ -848,9 +755,70 @@ struct CompanionPanelView: View {
 
     #if DEBUG
     @State private var showDevTools: Bool = false
+    @State private var devGeminiKeyInput: String = ""
+    @State private var devGeminiKeyStatus: String = ""
+    @State private var devOpenAIKeyInput: String = ""
+    @State private var devOpenAIKeyStatus: String = ""
+
+    /// Compact bring-your-own-key row used inside the Dev tools section
+    /// for both Gemini and OpenAI keys. SecureField + Save / Clear, no
+    /// inline explanation copy — the section is DEBUG-only and the user
+    /// already knows what these keys are for.
+    private func byokKeyRow(
+        title: String,
+        placeholder: String,
+        input: Binding<String>,
+        load: @escaping () -> Void,
+        save: @escaping () -> Void,
+        clear: @escaping () -> Void,
+        status: Binding<String>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Image(systemName: "key")
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .frame(width: 16)
+                Text(title)
+                    .font(.system(size: 12))
+                    .foregroundColor(DS.Colors.textSecondary)
+                Spacer()
+                Text(status.wrappedValue)
+                    .font(.system(size: 10))
+                    .foregroundColor(DS.Colors.textTertiary)
+            }
+            .padding(.horizontal, 10)
+
+            HStack(spacing: 6) {
+                SecureField(placeholder, text: input)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+
+                Button("Save") {
+                    save()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .pointerCursor()
+                .disabled(input.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                Button("Clear") {
+                    clear()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .pointerCursor()
+            }
+            .padding(.horizontal, 10)
+            .padding(.bottom, 4)
+            .onAppear { load() }
+        }
+    }
 
     private var devToolsSection: some View {
         VStack(alignment: .leading, spacing: 0) {
+            voiceBackendPicker
+
             devToolRow("Detection Overlay", systemImage: "square.grid.3x3") {
                 companionManager.showDetectionOverlay.toggle()
                 if companionManager.showDetectionOverlay {
@@ -878,6 +846,47 @@ struct CompanionPanelView: View {
                 companionManager.onboardingPromptOpacity = 0.0
                 companionManager.showOnboardingPrompt = false
             }
+
+            byokKeyRow(
+                title: "Gemini key",
+                placeholder: "AIzaSy…",
+                input: $devGeminiKeyInput,
+                load: { devGeminiKeyInput = KeychainStore.geminiAPIKey ?? "" },
+                save: {
+                    KeychainStore.geminiAPIKey = devGeminiKeyInput
+                    devGeminiKeyStatus = "Saved"
+                },
+                clear: {
+                    devGeminiKeyInput = ""
+                    KeychainStore.geminiAPIKey = nil
+                    devGeminiKeyStatus = "Cleared"
+                },
+                status: $devGeminiKeyStatus
+            )
+
+            byokKeyRow(
+                title: "OpenAI key",
+                placeholder: "sk-…",
+                input: $devOpenAIKeyInput,
+                load: { devOpenAIKeyInput = KeychainStore.openAIAPIKey ?? "" },
+                save: {
+                    KeychainStore.openAIAPIKey = devOpenAIKeyInput
+                    devOpenAIKeyStatus = "Saved"
+                },
+                clear: {
+                    devOpenAIKeyInput = ""
+                    KeychainStore.openAIAPIKey = nil
+                    devOpenAIKeyStatus = "Cleared"
+                },
+                status: $devOpenAIKeyStatus
+            )
+        }
+        .onAppear {
+            // Pre-populate the fields from Keychain so the user can see
+            // whether a key is already saved (revealed as dots in the
+            // SecureField). Cheap on-show; ignored if the key isn't set.
+            devGeminiKeyInput = KeychainStore.geminiAPIKey ?? ""
+            devOpenAIKeyInput = KeychainStore.openAIAPIKey ?? ""
         }
         .padding(.vertical, 4)
         .background(
@@ -918,6 +927,60 @@ struct CompanionPanelView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(DevToolRowButtonStyle())
+        .pointerCursor()
+    }
+
+    /// Two-option segmented picker for the active voice backend
+    /// (Gemini Live vs OpenAI Realtime). Hot-swaps the backend the
+    /// moment the user picks; any in-flight session on the previous
+    /// backend is stopped first.
+    private var voiceBackendPicker: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "waveform.badge.mic")
+                .font(.system(size: 11))
+                .foregroundColor(DS.Colors.textTertiary)
+                .frame(width: 16)
+
+            Text("Voice")
+                .font(.system(size: 12))
+                .foregroundColor(DS.Colors.textSecondary)
+
+            Spacer()
+
+            HStack(spacing: 0) {
+                ForEach(VoiceBackendKind.allCases) { kind in
+                    voiceBackendOption(kind)
+                }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.white.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+            )
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+    }
+
+    private func voiceBackendOption(_ kind: VoiceBackendKind) -> some View {
+        let isSelected = companionManager.voiceBackendKind == kind
+        return Button(action: {
+            companionManager.setVoiceBackendKind(kind)
+        }) {
+            Text(kind.displayName)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(isSelected ? Color.white.opacity(0.10) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
         .pointerCursor()
     }
 
