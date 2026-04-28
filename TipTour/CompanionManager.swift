@@ -84,8 +84,13 @@ final class CompanionManager: ObservableObject {
             apiKeyURL: "\(Self.workerBaseURL)/gemini-live-key",
             systemPrompt: Self.companionVoiceResponseSystemPrompt
         )
-        session.onPointAtElement = { [weak self] id, label, screenshotJPEG in
-            await self?.handleToolPointAtElement(id: id, label: label, screenshotJPEG: screenshotJPEG) ?? ["ok": false]
+        session.onPointAtElement = { [weak self] id, label, box2DNormalized, screenshotJPEG in
+            await self?.handleToolPointAtElement(
+                id: id,
+                label: label,
+                box2DNormalized: box2DNormalized,
+                screenshotJPEG: screenshotJPEG
+            ) ?? ["ok": false]
         }
         session.onSubmitWorkflowPlan = { [weak self] id, goal, app, steps in
             await self?.handleToolSubmitWorkflowPlan(id: id, goal: goal, app: app, steps: steps) ?? ["ok": false]
@@ -113,12 +118,56 @@ final class CompanionManager: ObservableObject {
         return session
     }()
 
+    // MARK: - box_2d → screenshot-pixel conversion
+
+    /// Convert Gemini's `box_2d` (in normalized [y1, x1, y2, x2] form, each
+    /// value in [0, 1000]) to the box's center in screenshot-pixel space.
+    /// Returns nil when no valid box was provided OR when we don't yet have
+    /// a screenshot to scale against.
+    ///
+    /// Why box_2d at all: Gemini 2.5 / 3.x is natively trained to localize
+    /// in this exact format. Asking for free-form (x, y) integers makes the
+    /// model do mental math against a downscaled image it never sees the
+    /// resolution of, which hurts pixel precision. box_2d normalizes that
+    /// away — the model emits the same format the docs prescribe and we
+    /// scale to the real screenshot dimensions on our side.
+    private func pixelHintFromBox2D(
+        box2DNormalized: [Int]?,
+        capture: CompanionScreenCapture?
+    ) -> CGPoint? {
+        guard let box = box2DNormalized, box.count == 4, let capture else {
+            return nil
+        }
+        let y1Norm = CGFloat(box[0])
+        let x1Norm = CGFloat(box[1])
+        let y2Norm = CGFloat(box[2])
+        let x2Norm = CGFloat(box[3])
+
+        let centerNormX = (x1Norm + x2Norm) / 2
+        let centerNormY = (y1Norm + y2Norm) / 2
+
+        let screenshotWidth = CGFloat(capture.screenshotWidthInPixels)
+        let screenshotHeight = CGFloat(capture.screenshotHeightInPixels)
+
+        let pixelX = centerNormX * screenshotWidth / 1000
+        let pixelY = centerNormY * screenshotHeight / 1000
+        return CGPoint(x: pixelX, y: pixelY)
+    }
+
     // MARK: - Tool Handlers
 
     /// Handle the `point_at_element` tool call. Resolves the label via the
-    /// AX tree → YOLO + OCR cascade and flies the cursor there.
+    /// AX tree → YOLO + OCR cascade and flies the cursor there. When Gemini
+    /// supplies a `box_2d`, its center (in screenshot-pixel space) is fed
+    /// to the resolver as a coordinate hint for the YOLO and raw-LLM-coord
+    /// fallbacks.
     @MainActor
-    private func handleToolPointAtElement(id: String, label: String, screenshotJPEG: Data?) async -> [String: Any] {
+    private func handleToolPointAtElement(
+        id: String,
+        label: String,
+        box2DNormalized: [Int]?,
+        screenshotJPEG: Data?
+    ) async -> [String: Any] {
         if handledToolCallIDsThisUtterance.contains(id) {
             print("[Tool] ⏭️  ignoring duplicate point_at_element id=\(id)")
             return ["ok": true, "duplicate": true]
@@ -131,13 +180,21 @@ final class CompanionManager: ObservableObject {
             print("[Tool] 🔄 superseding active plan \"\(activePlan.goal)\" — user asked for a single element \"\(label)\"")
             WorkflowRunner.shared.stop()
         }
-        print("[Tool] 🔧 point_at_element(label=\"\(label)\")")
+        let capture = geminiLiveSession.latestCapture
+        let hintInScreenshotPixels = pixelHintFromBox2D(
+            box2DNormalized: box2DNormalized,
+            capture: capture
+        )
+        if let hintInScreenshotPixels {
+            print("[Tool] 🔧 point_at_element(label=\"\(label)\", box_2d=\(box2DNormalized ?? []) → screenshot pixel \(hintInScreenshotPixels))")
+        } else {
+            print("[Tool] 🔧 point_at_element(label=\"\(label)\")")
+        }
         let startedAt = Date()
         planAppliedThisTurn = true
-        let capture = geminiLiveSession.latestCapture
         let resolution = await ElementResolver.shared.resolve(
             label: label,
-            llmHintInScreenshotPixels: nil,
+            llmHintInScreenshotPixels: hintInScreenshotPixels,
             latestCapture: capture
         )
         let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
@@ -192,18 +249,29 @@ final class CompanionManager: ObservableObject {
         print("[Tool] 🔧 submit_workflow_plan(goal=\"\(goal)\", app=\"\(app)\", \(steps.count) steps)")
         planAppliedThisTurn = true
 
+        let captureForBoxConversion = geminiLiveSession.latestCapture
         let parsedSteps: [WorkflowStep] = steps.enumerated().map { index, raw in
             let label = raw["label"] as? String
             let hint = raw["hint"] as? String ?? ""
-            let x = raw["x"] as? Int
-            let y = raw["y"] as? Int
+
+            // Convert Gemini's box_2d ([y1, x1, y2, x2] in [0, 1000]) to
+            // the box's center in screenshot-pixel space. The downstream
+            // resolver / YOLO pipeline expects pixel coords.
+            let box2DNormalized = (raw["box_2d"] as? [Int]).flatMap { $0.count == 4 ? $0 : nil }
+            let pixelCenter = pixelHintFromBox2D(
+                box2DNormalized: box2DNormalized,
+                capture: captureForBoxConversion
+            )
+            let hintX = pixelCenter.map { Int($0.x) }
+            let hintY = pixelCenter.map { Int($0.y) }
+
             return WorkflowStep(
                 id: "step_\(index + 1)",
                 type: .click,
                 label: label,
                 hint: hint,
-                hintX: x,
-                hintY: y,
+                hintX: hintX,
+                hintY: hintY,
                 screenNumber: nil
             )
         }
@@ -683,9 +751,10 @@ final class CompanionManager: ObservableObject {
 
     you have exactly TWO tools. call AT MOST ONE tool per turn. do NOT narrate before the tool call. call it silently, wait for the response, THEN speak ONCE.
 
-    TOOL: point_at_element(label)
+    TOOL: point_at_element(label, box_2d?)
       use for a SINGLE visible element. examples: "where's the save button", "point at the color inspector", "what is this tab".
       label = literal visible text on screen.
+      box_2d = OPTIONAL bounding box in [y1, x1, y2, x2] form, each value in [0, 1000] normalized to the screenshot. origin top-left, y first. include this whenever you can — it's how this model is natively trained to localize. ALWAYS include it for apps without accessibility (Blender, games, canvas tools) and whenever the label is ambiguous.
 
     UI ELEMENT HINTS (set-of-marks):
     alongside screenshots you will sometimes receive a "UI elements on screen" message listing pointable elements as [role:label] tokens — for example [button:Save] [menu:File] [item:New File...] [tab:Preview] [field:Search].
@@ -723,7 +792,8 @@ final class CompanionManager: ObservableObject {
       arguments:
         goal  = short summary of the user's intent ("create a new file", "render an animation").
         app   = exact foreground app name visible in the screenshot ("Blender", "Xcode", "GarageBand"). never "macOS" or "unknown".
-        steps = ordered array of {label, hint, x?, y?}. first step MUST be visible on the current screen. subsequent steps describe the path to take after clicking step 1; x/y optional on those. include x,y on step 1 only when the app lacks accessibility support (Blender, games, canvas tools).
+        steps = ordered array of {label, hint, box_2d?}. first step MUST be visible on the current screen. subsequent steps describe the path to take after clicking step 1.
+        box_2d = OPTIONAL bounding box for the step's element in [y1, x1, y2, x2] form, each value in [0, 1000] normalized to the current screenshot. origin top-left, y first. include it whenever you can on step 1 — it's how this model is natively trained to localize. ALWAYS include it for apps without accessibility (Blender, games, canvas tools).
 
     ABSOLUTE RULES:
     - exactly ONE tool call per turn. never both tools, never the same tool twice.
