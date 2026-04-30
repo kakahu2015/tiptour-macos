@@ -7,6 +7,7 @@
 //  for cursor pointing + multi-step workflows, and overlay management.
 //
 
+import ApplicationServices
 import AVFoundation
 import Combine
 import Foundation
@@ -511,6 +512,16 @@ final class CompanionManager: ObservableObject {
         refreshAllPermissions()
         print("🔑 TipTour start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
+
+        // Cap how long any AX query can hang waiting for a target app's
+        // accessibility server. Default is 6 seconds, which freezes the
+        // entire AX queue when a slow/unresponsive app is queried. 0.4s
+        // is generous enough for healthy responses and aggressive enough
+        // that a hung app fails fast and we move on to a fallback path.
+        // Per-element timeouts in AccessibilityTreeResolver layer on top.
+        let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, 0.4)
+
         // Touch the lazy property so the backend is constructed and the
         // publishers are subscribed BEFORE the user opens the panel /
         // presses the hotkey.
@@ -660,6 +671,7 @@ final class CompanionManager: ObservableObject {
         if let current = NSWorkspace.shared.frontmostApplication,
            current.bundleIdentifier != Bundle.main.bundleIdentifier {
             AccessibilityTreeResolver.userTargetAppOverride = current
+            Self.enableManualAccessibilityIfNeeded(for: current)
         }
 
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -672,6 +684,49 @@ final class CompanionManager: ObservableObject {
             }
             guard app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
             AccessibilityTreeResolver.userTargetAppOverride = app
+            Self.enableManualAccessibilityIfNeeded(for: app)
+        }
+    }
+
+    /// Electron apps (Framer, VS Code, Slack, Discord, Cursor, Notion,
+    /// Figma desktop, etc.) ship with their AX tree gated behind a special
+    /// `AXManualAccessibility` flag — Electron PR #10305 added this to
+    /// avoid the side effects of `AXEnhancedUserInterface` (which makes
+    /// Chromium animate window resizes and breaks window managers like
+    /// Magnet/Rectangle).
+    ///
+    /// Setting this attribute on an Electron app's *application* AX
+    /// element (not the window) populates the entire web-page AX tree so
+    /// our resolver can find buttons, menus, and inputs by label.
+    /// Non-Electron apps return `kAXErrorAttributeUnsupported` — which is
+    /// harmless; we just ignore it. The cost of setting it universally on
+    /// every app activation is one cheap AX call.
+    ///
+    /// Without this, the AX walk in apps like Framer returns 0 candidates
+    /// (`menuBarChildren=7, candidates=0` in logs), forcing a slow,
+    /// less-accurate vision fallback. With it, Framer's tree is fully
+    /// populated and resolution lands on the right element first try.
+    private static func enableManualAccessibilityIfNeeded(for app: NSRunningApplication) {
+        let pid = app.processIdentifier
+        guard pid > 0 else { return }
+        let appElement = AXUIElementCreateApplication(pid)
+        // Cap the messaging timeout per-app too, in case the target's AX
+        // server is slow on first contact.
+        AXUIElementSetMessagingTimeout(appElement, 0.4)
+        let attributeName = "AXManualAccessibility" as CFString
+        let result = AXUIElementSetAttributeValue(appElement, attributeName, kCFBooleanTrue)
+        switch result {
+        case .success:
+            print("[AX] enabled AXManualAccessibility for \(app.bundleIdentifier ?? "?") (\(app.localizedName ?? "?"))")
+        case .attributeUnsupported, .actionUnsupported:
+            // Non-Electron app — expected.
+            break
+        case .cannotComplete, .notImplemented:
+            // App not ready / sandboxed — expected for some launchers.
+            break
+        default:
+            // Anything else is unusual but non-fatal; log for diagnosis.
+            print("[AX] AXManualAccessibility set returned \(result.rawValue) for \(app.bundleIdentifier ?? "?")")
         }
     }
 
