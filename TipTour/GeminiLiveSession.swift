@@ -158,6 +158,13 @@ final class GeminiLiveSession: ObservableObject {
                 self?.handleGeminiEvent(event)
             }
         }
+
+        // Prime SCShareableContent cache at init time so the first
+        // captureAllScreensAsJPEG call during session start doesn't pay
+        // the 50-200ms enumeration cost in the hot path.
+        Task {
+            _ = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+        }
     }
 
     // MARK: - Session Lifecycle
@@ -171,11 +178,7 @@ final class GeminiLiveSession: ObservableObject {
             return
         }
 
-        // Both the key fetch and the WebSocket handshake are flaky network
-        // ops that fail individually about ~1% of the time (DNS hiccup,
-        // brief Cloudflare 5xx, TLS renegotiation). Wrap each in
-        // exponential backoff so a single transient blip doesn't kill
-        // the user's push-to-talk session before it even starts.
+        // Fetch the API key first (fast — Keychain read or cached worker key).
         let apiKey = try await RetryWithExponentialBackoff.run(
             maxAttempts: 3,
             initialDelay: 0.5,
@@ -247,7 +250,61 @@ final class GeminiLiveSession: ObservableObject {
 
         isActive = false
         isModelSpeaking = false
+        isSuspended = false
         print("[GeminiLiveSession] Session stopped")
+    }
+
+    // MARK: - Suspend / Resume (toggle push-to-talk fast path)
+    //
+    // When the user presses Ctrl+Option to close the session, we
+    // suspend instead of fully stopping. The WebSocket stays open and
+    // the server-side Gemini context is preserved. The next press
+    // resumes by restarting mic capture and screenshots — skipping the
+    // entire WebSocket handshake and setupComplete round-trip.
+    //
+    // A full stop() is still used on error, workflow start, and explicit
+    // session teardown so the WebSocket doesn't accumulate stale state.
+
+    /// True while the session is alive but mic and screenshots are paused
+    /// (the WebSocket is still connected).
+    private(set) var isSuspended: Bool = false
+
+    /// Pause mic + screenshots while keeping the WebSocket alive.
+    /// Sets `isActive = false` so the rest of the app treats this as
+    /// "not listening", but preserves the connection for fast resume.
+    func suspend() {
+        guard isActive, !isSuspended else { return }
+        stopPeriodicScreenshotUpdates()
+        stopMicCapture()
+        audioPlayer.clearQueuedAudio()
+        hasReceivedUserSpeechThisSession = false
+        isActive = false
+        isModelSpeaking = false
+        isSuspended = true
+        print("[GeminiLiveSession] Suspended — WebSocket kept alive for fast resume")
+    }
+
+    /// Resume mic + screenshots on the existing WebSocket. Skips
+    /// WebSocket handshake and setupComplete entirely.
+    func resumeFromSuspend() async throws {
+        guard isSuspended, geminiClient.isConnected else {
+            // WebSocket dropped while suspended — fall back to full start.
+            isSuspended = false
+            print("[GeminiLiveSession] Resume failed — WebSocket gone, falling back to full start")
+            throw NSError(domain: "GeminiLiveSession", code: -20,
+                          userInfo: [NSLocalizedDescriptionKey: "WebSocket lost during suspend"])
+        }
+        lastSentScreenshotHashByScreenLabel.removeAll()
+        try startMicCapture()
+        audioPlayer.startPlaying()
+        isActive = true
+        isSuspended = false
+        inputTranscript = ""
+        startPeriodicScreenshotUpdates()
+        Task { @MainActor in
+            await captureAndProcessFrameForGemini()
+        }
+        print("[GeminiLiveSession] Resumed from suspend — reused existing WebSocket")
     }
 
     // MARK: - Narration Mode
@@ -523,9 +580,15 @@ final class GeminiLiveSession: ObservableObject {
             if formatted == lastSentMarks {
                 return
             }
-            await MainActor.run { self.lastSentSetOfMarks = formatted }
             let preamble = "UI elements on screen (use these exact labels in tool calls):\n"
-            self.geminiClient.sendText(preamble + formatted)
+            let textToSend = preamble + formatted
+            // Hop back to MainActor to access self.lastSentSetOfMarks and
+            // self.geminiClient — both are MainActor-isolated.
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.lastSentSetOfMarks = formatted
+                self.geminiClient.sendText(textToSend)
+            }
         }
     }
 

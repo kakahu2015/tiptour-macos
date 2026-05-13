@@ -14,8 +14,12 @@ enum PushToTalkShortcut {
     enum ShortcutTransition {
         case pressed
         case released
+        case escapePressed
         case none
     }
+
+    /// macOS virtual key code for the Escape key.
+    static let escapeKeyCode: UInt16 = 53
 
     static func shortcutTransition(
         for eventType: CGEventType,

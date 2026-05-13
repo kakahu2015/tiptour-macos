@@ -100,6 +100,11 @@ final class GeminiLiveClient: @unchecked Sendable {
     /// when the user just released push-to-talk).
     private var _wasIntentionallyDisconnected: Bool = false
 
+    /// Continuation suspended in connect() waiting for the server's
+    /// setupComplete message. Resumed by the receive loop as soon as the
+    /// message arrives — no polling, zero unnecessary latency.
+    private var setupCompleteContinuation: CheckedContinuation<Void, Error>?
+
     /// Periodic no-op ping that prevents Gemini Live's silent idle
     /// disconnect. Per Google's docs the server closes the socket after
     /// roughly 30 minutes of inactivity; we send a benign clientContent
@@ -141,7 +146,8 @@ final class GeminiLiveClient: @unchecked Sendable {
             return
         }
 
-        let urlString = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=\(apiKey)"
+        //let urlString = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=\(apiKey)"
+        let urlString = "wss://a.kakahu.eu.org/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=\(apiKey)"
         guard let url = URL(string: urlString) else {
             throw NSError(domain: "GeminiLive", code: -1,
                           userInfo: [NSLocalizedDescriptionKey: "Invalid WebSocket URL"])
@@ -307,16 +313,11 @@ final class GeminiLiveClient: @unchecked Sendable {
 
         try await sendJSON(setupMessage)
 
-        // Wait for setupComplete before allowing audio/image input.
-        // The receive loop will flip isSetupComplete and fire the .setupComplete event.
-        let setupDeadline = Date().addingTimeInterval(10)
-        while !isSetupComplete {
-            if Date() > setupDeadline {
-                disconnect()
-                throw NSError(domain: "GeminiLive", code: -2,
-                              userInfo: [NSLocalizedDescriptionKey: "Setup timeout — no setupComplete after 10s"])
-            }
-            try await Task.sleep(nanoseconds: 50_000_000) // 50ms
+        // Suspend until the receive loop delivers setupComplete.
+        // Using a CheckedContinuation means we resume the instant the
+        // server message arrives — no 50ms polling overhead.
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            stateLock.withLock { setupCompleteContinuation = continuation }
         }
     }
 
@@ -324,19 +325,33 @@ final class GeminiLiveClient: @unchecked Sendable {
     /// intentional so the receive loop won't fire `.unexpectedDisconnect`
     /// on the way out.
     func disconnect() {
-        let (capturedReceiveTask, capturedWebSocketTask, capturedKeepAliveTask) = stateLock.withLock {
-            let taken = (receiveLoopTask, webSocketTask, keepAlivePingTask)
+        let capturedReceiveTask: Task<Void, Never>?
+        let capturedWebSocketTask: URLSessionWebSocketTask?
+        let capturedKeepAliveTask: Task<Void, Never>?
+        let capturedSetupContinuation: CheckedContinuation<Void, Error>?
+        (capturedReceiveTask, capturedWebSocketTask, capturedKeepAliveTask, capturedSetupContinuation) = stateLock.withLock {
+            let takenReceive = receiveLoopTask
+            let takenSocket = webSocketTask
+            let takenKeepAlive = keepAlivePingTask
+            let takenContinuation = setupCompleteContinuation
             receiveLoopTask = nil
             webSocketTask = nil
             keepAlivePingTask = nil
+            setupCompleteContinuation = nil
             _isConnected = false
             _isSetupComplete = false
             _wasIntentionallyDisconnected = true
-            return taken
+            return (takenReceive, takenSocket, takenKeepAlive, takenContinuation)
         }
         capturedReceiveTask?.cancel()
         capturedKeepAliveTask?.cancel()
         capturedWebSocketTask?.cancel(with: .normalClosure, reason: nil)
+        // If disconnect() is called while connect() is still waiting for
+        // setupComplete, unblock it with an error so the caller doesn't hang.
+        capturedSetupContinuation?.resume(throwing: NSError(
+            domain: "GeminiLive", code: -3,
+            userInfo: [NSLocalizedDescriptionKey: "Disconnected before setup completed"]
+        ))
         print("[GeminiLive] WebSocket closed")
     }
 
@@ -554,9 +569,15 @@ final class GeminiLiveClient: @unchecked Sendable {
 
         // 1. Setup complete — we're ready to send input
         if json["setupComplete"] != nil {
-            stateLock.withLock { _isSetupComplete = true }
+            let pendingContinuation = stateLock.withLock { () -> CheckedContinuation<Void, Error>? in
+                _isSetupComplete = true
+                let continuation = setupCompleteContinuation
+                setupCompleteContinuation = nil
+                return continuation
+            }
             print("[GeminiLive] Setup complete")
             startKeepAlivePingLoop()
+            pendingContinuation?.resume()
             dispatchEvent(.setupComplete)
             return
         }

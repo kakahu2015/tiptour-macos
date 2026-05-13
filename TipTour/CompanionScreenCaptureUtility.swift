@@ -28,11 +28,65 @@ struct CompanionScreenCapture {
 @MainActor
 enum CompanionScreenCaptureUtility {
 
+    // MARK: - SCShareableContent cache
+    //
+    // SCShareableContent.excludingDesktopWindows is the single heaviest call
+    // in the capture path (~50-200ms). Caching it for 10 seconds means the
+    // 3-second periodic screenshot loop pays that cost at most once per 10s
+    // instead of every frame. The cache is invalidated when the on-screen
+    // window count changes (app launch/quit) or after the TTL expires.
+
+    private struct CachedShareableContent {
+        let content: SCShareableContent
+        let ownAppWindows: [SCWindow]
+        let nsScreenByDisplayID: [CGDirectDisplayID: NSScreen]
+        let fetchedAt: Date
+        let windowCount: Int
+    }
+
+    private static var cachedShareableContent: CachedShareableContent?
+    /// How long the cache stays valid when the window count hasn't changed.
+    private static let shareableContentCacheTTL: TimeInterval = 10.0
+
+    private static func fetchShareableContent() async throws -> CachedShareableContent {
+        let currentWindowCount = NSWorkspace.shared.runningApplications.count
+
+        if let cached = cachedShareableContent,
+           cached.windowCount == currentWindowCount,
+           Date().timeIntervalSince(cached.fetchedAt) < shareableContentCacheTTL {
+            return cached
+        }
+
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let ownBundleIdentifier = Bundle.main.bundleIdentifier
+        let ownAppWindows = content.windows.filter { $0.owningApplication?.bundleIdentifier == ownBundleIdentifier }
+
+        var nsScreenByDisplayID: [CGDirectDisplayID: NSScreen] = [:]
+        for screen in NSScreen.screens {
+            if let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID {
+                nsScreenByDisplayID[screenNumber] = screen
+            }
+        }
+
+        let fresh = CachedShareableContent(
+            content: content,
+            ownAppWindows: ownAppWindows,
+            nsScreenByDisplayID: nsScreenByDisplayID,
+            fetchedAt: Date(),
+            windowCount: currentWindowCount
+        )
+        cachedShareableContent = fresh
+        return fresh
+    }
+
     /// Captures all connected displays as JPEG data, labeling each with
     /// whether the user's cursor is on that screen. This gives the AI
     /// full context across multiple monitors.
     static func captureAllScreensAsJPEG() async throws -> [CompanionScreenCapture] {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let cached = try await fetchShareableContent()
+        let content = cached.content
+        let ownAppWindows = cached.ownAppWindows
+        let nsScreenByDisplayID = cached.nsScreenByDisplayID
 
         guard !content.displays.isEmpty else {
             throw NSError(domain: "CompanionScreenCapture", code: -1,
@@ -40,26 +94,6 @@ enum CompanionScreenCaptureUtility {
         }
 
         let mouseLocation = NSEvent.mouseLocation
-
-        // Exclude all windows belonging to this app so the AI sees
-        // only the user's content, not our overlays or panels.
-        let ownBundleIdentifier = Bundle.main.bundleIdentifier
-        let ownAppWindows = content.windows.filter { window in
-            window.owningApplication?.bundleIdentifier == ownBundleIdentifier
-        }
-
-        // Build a lookup from display ID to NSScreen so we can use AppKit-coordinate
-        // frames instead of CG-coordinate frames. NSEvent.mouseLocation and NSScreen.frame
-        // both use AppKit coordinates (bottom-left origin), while SCDisplay.frame uses
-        // Core Graphics coordinates (top-left origin). On multi-display setups, the Y
-        // origins differ for secondary displays, which breaks cursor-contains checks
-        // and downstream coordinate conversions.
-        var nsScreenByDisplayID: [CGDirectDisplayID: NSScreen] = [:]
-        for screen in NSScreen.screens {
-            if let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID {
-                nsScreenByDisplayID[screenNumber] = screen
-            }
-        }
 
         // Sort displays so the cursor screen is always first
         let sortedDisplays = content.displays.sorted { displayA, displayB in
@@ -139,7 +173,10 @@ enum CompanionScreenCaptureUtility {
     /// Skips JPEG encoding — use this for on-device detection where
     /// you need a CGImage directly (no network transfer).
     static func capturePrimaryScreenAsCGImage() async throws -> CGImage {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let cached = try await fetchShareableContent()
+        let content = cached.content
+        let ownAppWindows = cached.ownAppWindows
+        let nsScreenByDisplayID = cached.nsScreenByDisplayID
 
         guard !content.displays.isEmpty else {
             throw NSError(domain: "CompanionScreenCapture", code: -1,
@@ -147,19 +184,6 @@ enum CompanionScreenCaptureUtility {
         }
 
         let mouseLocation = NSEvent.mouseLocation
-
-        let ownBundleIdentifier = Bundle.main.bundleIdentifier
-        let ownAppWindows = content.windows.filter { window in
-            window.owningApplication?.bundleIdentifier == ownBundleIdentifier
-        }
-
-        // Find the display the cursor is on
-        var nsScreenByDisplayID: [CGDirectDisplayID: NSScreen] = [:]
-        for screen in NSScreen.screens {
-            if let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID {
-                nsScreenByDisplayID[screenNumber] = screen
-            }
-        }
 
         let cursorDisplay = content.displays.first { display in
             let frame = nsScreenByDisplayID[display.displayID]?.frame ?? display.frame

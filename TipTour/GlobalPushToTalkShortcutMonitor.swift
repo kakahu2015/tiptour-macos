@@ -109,6 +109,13 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         }
 
         let eventKeyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+
+        // Escape key (keyCode 53) while a session is active stops the mic.
+        if eventType == .keyDown, eventKeyCode == PushToTalkShortcut.escapeKeyCode {
+            shortcutTransitionPublisher.send(.escapePressed)
+            return Unmanaged.passUnretained(event)
+        }
+
         let shortcutTransition = PushToTalkShortcut.shortcutTransition(
             for: eventType,
             keyCode: eventKeyCode,
@@ -125,6 +132,8 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         case .released:
             isShortcutCurrentlyPressed = false
             shortcutTransitionPublisher.send(.released)
+        case .escapePressed:
+            break
         }
 
         return Unmanaged.passUnretained(event)

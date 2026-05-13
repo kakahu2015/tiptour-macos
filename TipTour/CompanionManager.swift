@@ -615,25 +615,23 @@ final class CompanionManager: ObservableObject {
             onboardingPromptOpacity = 1.0
         }
 
-        var currentIndex = 0
-        Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { timer in
-            guard currentIndex < message.count else {
-                timer.invalidate()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) {
-                    guard self.showOnboardingPrompt else { return }
-                    withAnimation(.easeOut(duration: 0.3)) {
-                        self.onboardingPromptOpacity = 0.0
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                        self.showOnboardingPrompt = false
-                        self.onboardingPromptText = ""
-                    }
-                }
-                return
+        // Task keeps the typewriter loop and the fade-out entirely on
+        // MainActor — no Sendable closure crossing actor boundaries.
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            for character in message {
+                guard self.showOnboardingPrompt else { return }
+                self.onboardingPromptText.append(character)
+                try? await Task.sleep(nanoseconds: 30_000_000) // 30ms per character
             }
-            let index = message.index(message.startIndex, offsetBy: currentIndex)
-            self.onboardingPromptText.append(message[index])
-            currentIndex += 1
+            try? await Task.sleep(nanoseconds: 10_000_000_000) // 10s display hold
+            guard self.showOnboardingPrompt else { return }
+            withAnimation(.easeOut(duration: 0.3)) {
+                self.onboardingPromptOpacity = 0.0
+            }
+            try? await Task.sleep(nanoseconds: 350_000_000) // 0.35s for fade
+            self.showOnboardingPrompt = false
+            self.onboardingPromptText = ""
         }
     }
 
@@ -835,8 +833,12 @@ final class CompanionManager: ObservableObject {
                 return
             }
             guard app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
-            AccessibilityTreeResolver.userTargetAppOverride = app
-            Self.enableManualAccessibilityIfNeeded(for: app)
+            // Hop to MainActor — both userTargetAppOverride and
+            // enableManualAccessibilityIfNeeded are @MainActor-isolated.
+            Task { @MainActor in
+                AccessibilityTreeResolver.userTargetAppOverride = app
+                Self.enableManualAccessibilityIfNeeded(for: app)
+            }
         }
     }
 
@@ -913,10 +915,13 @@ final class CompanionManager: ObservableObject {
             TipTourAnalytics.trackPushToTalkStarted()
 
             // Gemini Live uses TOGGLE behavior — press once to start, press
-            // again to end. The connection stays open across turns so the
-            // user can have a real conversation.
+            // again to end. On close we suspend (WebSocket stays alive);
+            // on reopen we resume from suspend if the socket is still up,
+            // otherwise fall back to a full start. This eliminates the
+            // WebSocket handshake + setupComplete round-trip on every turn.
             if voiceBackend.isActive {
-                stopVoiceSession()
+                WorkflowRunner.shared.stop()
+                voiceBackend.suspend()
                 voiceState = .idle
             } else {
                 startVoiceSession()
@@ -925,6 +930,14 @@ final class CompanionManager: ObservableObject {
         case .released:
             // Release is a no-op — the session is toggled by hotkey PRESS.
             TipTourAnalytics.trackPushToTalkReleased()
+        case .escapePressed:
+            // Escape stops the session when it's active, and stops any
+            // running workflow. Does nothing when already idle.
+            guard voiceBackend.isActive || voiceBackend.isSuspended else { break }
+            WorkflowRunner.shared.stop()
+            voiceBackend.suspend()
+            voiceState = .idle
+            clearDetectedElementLocation()
         case .none:
             break
         }
@@ -1900,9 +1913,27 @@ final class CompanionManager: ObservableObject {
 
         Task {
             do {
-                try await voiceBackend.start(initialScreenshot: nil)
+                // Fast path: resume from suspend reuses the existing WebSocket,
+                // skipping the handshake + setupComplete round-trip entirely.
+                if voiceBackend.isSuspended {
+                    try await voiceBackend.resumeFromSuspend()
+                } else {
+                    try await voiceBackend.start(initialScreenshot: nil)
+                }
             } catch {
-                print("[GeminiLive] Failed to start session: \(error.localizedDescription)")
+                // resumeFromSuspend throws when the WebSocket dropped during
+                // suspend; it clears isSuspended before throwing so we can
+                // call start() directly for a full reconnect.
+                if !voiceBackend.isSuspended {
+                    print("[GeminiLive] Resume failed, starting fresh session: \(error.localizedDescription)")
+                    do {
+                        try await voiceBackend.start(initialScreenshot: nil)
+                    } catch {
+                        print("[GeminiLive] Failed to start session: \(error.localizedDescription)")
+                    }
+                } else {
+                    print("[GeminiLive] Failed to start session: \(error.localizedDescription)")
+                }
             }
         }
     }
