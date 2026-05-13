@@ -35,16 +35,6 @@
 			path = TipTour;
 			sourceTree = "<group>";
 		};
-		28F22CCF2F56440300A0FC59 /* TipTourTests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = TipTourTests;
-			sourceTree = "<group>";
-		};
-		28F22CD92F56440300A0FC59 /* TipTourUITests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = TipTourUITests;
-			sourceTree = "<group>";
-		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -65,8 +55,6 @@
 			isa = PBXGroup;
 			children = (
 				28F22CC12F56440300A0FC59 /* TipTour */,
-				28F22CCF2F56440300A0FC59 /* TipTourTests */,
-				28F22CD92F56440300A0FC59 /* TipTourUITests */,
 				28F22CC02F56440300A0FC59 /* Products */,
 			);
 			sourceTree = "<group>";
