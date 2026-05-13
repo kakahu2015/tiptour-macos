@@ -454,7 +454,7 @@ final class CompanionManager: ObservableObject {
             var quietSinceTimestamp: Date?
 
             while Date() < maxDeadline {
-                try? await Task.sleep(nanoseconds: 200_000_000)
+                try? await Task.sleep(nanoseconds: 100_000_000)
 
                 let (isActive, speaking, playing) = await MainActor.run { () -> (Bool, Bool, Bool) in
                     (

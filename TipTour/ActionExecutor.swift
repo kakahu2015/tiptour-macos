@@ -36,7 +36,7 @@ final class ActionExecutor {
 
     static let shared = ActionExecutor()
 
-    private let postActivationSettleSeconds: TimeInterval = 0.08
+    private let postActivationSettleSeconds: TimeInterval = 0.05
     private let postForegroundActivationSettleSeconds: TimeInterval = 0.35
     private var pendingTextReplacementRangeByProcessIdentifier: [pid_t: CFRange] = [:]
 
@@ -414,7 +414,7 @@ final class ActionExecutor {
 
         do {
             try KeyboardInput.hotkey(["cmd", "v"], toPid: targetProcessIdentifier)
-            try await Task.sleep(nanoseconds: 150_000_000)
+            try await Task.sleep(nanoseconds: 80_000_000)
             restorePasteboard(pasteboard, items: previousPasteboardItems)
         } catch {
             restorePasteboard(pasteboard, items: previousPasteboardItems)
