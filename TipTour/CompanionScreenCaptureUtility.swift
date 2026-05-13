@@ -82,6 +82,12 @@ enum CompanionScreenCaptureUtility {
     /// Captures all connected displays as JPEG data, labeling each with
     /// whether the user's cursor is on that screen. This gives the AI
     /// full context across multiple monitors.
+    ///
+    /// The cursor screen is always captured first and is always included.
+    /// Non-cursor screens are captured concurrently after the primary so
+    /// callers that only need the primary (GeminiLiveSession) pay only
+    /// one SCScreenshotManager round-trip on single-display setups, and
+    /// the multi-display case doesn't block on sequential captures.
     static func captureAllScreensAsJPEG() async throws -> [CompanionScreenCapture] {
         let cached = try await fetchShareableContent()
         let content = cached.content
@@ -105,68 +111,106 @@ enum CompanionScreenCaptureUtility {
             return false
         }
 
-        var capturedScreens: [CompanionScreenCapture] = []
+        let totalDisplayCount = sortedDisplays.count
 
-        for (displayIndex, display) in sortedDisplays.enumerated() {
-            // Use NSScreen.frame (AppKit coordinates, bottom-left origin) so
-            // displayFrame is in the same coordinate system as NSEvent.mouseLocation
-            // and the overlay window's screenFrame in BlueCursorView.
-            let displayFrame = nsScreenByDisplayID[display.displayID]?.frame
-                ?? CGRect(x: display.frame.origin.x, y: display.frame.origin.y,
-                          width: CGFloat(display.width), height: CGFloat(display.height))
-            let isCursorScreen = displayFrame.contains(mouseLocation)
-
-            let filter = SCContentFilter(display: display, excludingWindows: ownAppWindows)
-
-            let configuration = SCStreamConfiguration()
-            let maxDimension = 1280
-            let aspectRatio = CGFloat(display.width) / CGFloat(display.height)
-            if display.width >= display.height {
-                configuration.width = maxDimension
-                configuration.height = Int(CGFloat(maxDimension) / aspectRatio)
-            } else {
-                configuration.height = maxDimension
-                configuration.width = Int(CGFloat(maxDimension) * aspectRatio)
-            }
-
-            let cgImage = try await SCScreenshotManager.captureImage(
-                contentFilter: filter,
-                configuration: configuration
-            )
-
-            guard let jpegData = NSBitmapImageRep(cgImage: cgImage)
-                    .representation(using: .jpeg, properties: [.compressionFactor: 0.55]) else {
-                continue
-            }
-
-            let screenLabel: String
-            if sortedDisplays.count == 1 {
-                screenLabel = "user's screen (cursor is here)"
-            } else if isCursorScreen {
-                screenLabel = "screen \(displayIndex + 1) of \(sortedDisplays.count) — cursor is on this screen (primary focus)"
-            } else {
-                screenLabel = "screen \(displayIndex + 1) of \(sortedDisplays.count) — secondary screen"
-            }
-
-            capturedScreens.append(CompanionScreenCapture(
-                imageData: jpegData,
-                label: screenLabel,
-                isCursorScreen: isCursorScreen,
-                displayWidthInPoints: Int(displayFrame.width),
-                displayHeightInPoints: Int(displayFrame.height),
-                displayFrame: displayFrame,
-                screenshotWidthInPixels: configuration.width,
-                screenshotHeightInPixels: configuration.height,
-                captureTimestamp: Date()
-            ))
-        }
-
-        guard !capturedScreens.isEmpty else {
+        // Capture cursor screen first (synchronously) so callers that only
+        // need the primary don't wait on secondary display captures.
+        guard let primaryCapture = await captureDisplayAsJPEG(
+            display: sortedDisplays[0],
+            displayIndex: 0,
+            totalDisplayCount: totalDisplayCount,
+            nsScreenByDisplayID: nsScreenByDisplayID,
+            ownAppWindows: ownAppWindows,
+            mouseLocation: mouseLocation
+        ) else {
             throw NSError(domain: "CompanionScreenCapture", code: -2,
-                          userInfo: [NSLocalizedDescriptionKey: "Failed to capture any screen"])
+                          userInfo: [NSLocalizedDescriptionKey: "Failed to capture primary screen"])
         }
 
-        return capturedScreens
+        guard totalDisplayCount > 1 else {
+            return [primaryCapture]
+        }
+
+        // Capture remaining displays concurrently — each SCScreenshotManager
+        // call is independent so they can run in parallel without ordering issues.
+        var secondaryCaptures: [CompanionScreenCapture] = []
+        await withTaskGroup(of: CompanionScreenCapture?.self) { group in
+            for displayIndex in 1..<totalDisplayCount {
+                group.addTask {
+                    await captureDisplayAsJPEG(
+                        display: sortedDisplays[displayIndex],
+                        displayIndex: displayIndex,
+                        totalDisplayCount: totalDisplayCount,
+                        nsScreenByDisplayID: nsScreenByDisplayID,
+                        ownAppWindows: ownAppWindows,
+                        mouseLocation: mouseLocation
+                    )
+                }
+            }
+            for await capture in group {
+                if let capture { secondaryCaptures.append(capture) }
+            }
+        }
+
+        return [primaryCapture] + secondaryCaptures
+    }
+
+    private static func captureDisplayAsJPEG(
+        display: SCDisplay,
+        displayIndex: Int,
+        totalDisplayCount: Int,
+        nsScreenByDisplayID: [CGDirectDisplayID: NSScreen],
+        ownAppWindows: [SCWindow],
+        mouseLocation: CGPoint
+    ) async -> CompanionScreenCapture? {
+        let displayFrame = nsScreenByDisplayID[display.displayID]?.frame
+            ?? CGRect(x: display.frame.origin.x, y: display.frame.origin.y,
+                      width: CGFloat(display.width), height: CGFloat(display.height))
+        let isCursorScreen = displayFrame.contains(mouseLocation)
+
+        let filter = SCContentFilter(display: display, excludingWindows: ownAppWindows)
+
+        let configuration = SCStreamConfiguration()
+        let maxDimension = 1280
+        let aspectRatio = CGFloat(display.width) / CGFloat(display.height)
+        if display.width >= display.height {
+            configuration.width = maxDimension
+            configuration.height = Int(CGFloat(maxDimension) / aspectRatio)
+        } else {
+            configuration.height = maxDimension
+            configuration.width = Int(CGFloat(maxDimension) * aspectRatio)
+        }
+
+        guard let cgImage = try? await SCScreenshotManager.captureImage(
+            contentFilter: filter,
+            configuration: configuration
+        ) else { return nil }
+
+        guard let jpegData = NSBitmapImageRep(cgImage: cgImage)
+                .representation(using: .jpeg, properties: [.compressionFactor: 0.55]) else {
+            return nil
+        }
+
+        let screenLabel: String
+        if totalDisplayCount == 1 {
+            screenLabel = "user's screen (cursor is here)"
+        } else if isCursorScreen {
+            screenLabel = "screen \(displayIndex + 1) of \(totalDisplayCount) — cursor is on this screen (primary focus)"
+        } else {
+            screenLabel = "screen \(displayIndex + 1) of \(totalDisplayCount) — secondary screen"
+        }
+
+        return CompanionScreenCapture(
+            imageData: jpegData,
+            label: screenLabel,
+            isCursorScreen: isCursorScreen,
+            displayWidthInPoints: Int(displayFrame.width),
+            displayHeightInPoints: Int(displayFrame.height),
+            displayFrame: displayFrame,
+            screenshotWidthInPixels: configuration.width,
+            screenshotHeightInPixels: configuration.height,
+            captureTimestamp: Date()
+        )
     }
 
     /// Lightweight capture of the cursor screen as a raw CGImage.

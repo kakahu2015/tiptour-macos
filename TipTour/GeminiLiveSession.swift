@@ -561,11 +561,13 @@ final class GeminiLiveSession: ObservableObject {
             return
         }
 
-        // Marks walk runs off-main at background priority so the CoreML
-        // / Audio threads always take precedence — the AX walk is
-        // cheap (<200ms worst case) but we don't want it contending
-        // with Gemini's real-time voice pipeline.
+        // AX marks walk and screenshot send happen concurrently — the
+        // walk is off-main at background priority so it never contends
+        // with Core Audio. By the time the walk finishes the screenshot
+        // is already in-flight, so Gemini receives both in the same
+        // tick instead of marks arriving one round-trip later.
         let lastSentMarks = lastSentSetOfMarks
+        let capturedGeminiClient = geminiClient
         Task.detached(priority: .background) { [weak self] in
             guard let self else { return }
             let resolver = AccessibilityTreeResolver()
@@ -574,20 +576,19 @@ final class GeminiLiveSession: ObservableObject {
                 return
             }
             let formatted = AccessibilityTreeResolver.formatMarks(marks)
-            // Skip if identical to what we sent last time — keeps
-            // Gemini's context lean during static screens and avoids
-            // paying tokens to re-send the same mark list every 3s.
+            // Skip if identical to what we sent last time.
             if formatted == lastSentMarks {
                 return
             }
             let preamble = "UI elements on screen (use these exact labels in tool calls):\n"
             let textToSend = preamble + formatted
-            // Hop back to MainActor to access self.lastSentSetOfMarks and
-            // self.geminiClient — both are MainActor-isolated.
+            // Send the marks text directly from the background task —
+            // GeminiLiveClient.sendText is thread-safe (WebSocket .send
+            // is safe from any thread). Update lastSentSetOfMarks on
+            // MainActor separately so the next tick's dedup check is correct.
+            capturedGeminiClient.sendText(textToSend)
             await MainActor.run { [weak self] in
-                guard let self else { return }
-                self.lastSentSetOfMarks = formatted
-                self.geminiClient.sendText(textToSend)
+                self?.lastSentSetOfMarks = formatted
             }
         }
     }
