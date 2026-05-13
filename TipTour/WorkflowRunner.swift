@@ -783,6 +783,54 @@ final class WorkflowRunner: ObservableObject {
         }
     }
 
+    
+    private func focusTargetForTextInputIfNeeded(
+        step: WorkflowStep,
+        operationToken: UUID
+    ) async {
+        guard operationToken == currentOperationToken else { return }
+
+        guard let label = step.label?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !label.isEmpty
+        else {
+            return
+        }
+
+        if let value = step.value?.trimmingCharacters(in: .whitespacesAndNewlines),
+           value == label {
+            return
+        }
+
+        let pickedCapture = latestCaptureForActivePlan
+
+        let resolution = await ElementResolver.shared.resolve(
+            label: label,
+            llmHintInScreenshotPixels: pickedCapture.flatMap { step.hintCoordinate(in: $0) },
+            latestCapture: pickedCapture,
+            targetAppHint: activePlan?.app,
+            proximityAnchorInGlobalScreen: previousStepResolvedGlobalScreenPoint
+        )
+
+        guard operationToken == currentOperationToken else { return }
+
+        guard let resolution else {
+            print("[Workflow] text input target \"\(label)\" not resolved — using current focused element")
+            return
+        }
+
+        previousStepResolvedGlobalScreenPoint = resolution.globalScreenPoint
+
+        do {
+            try await ActionExecutor.shared.click(
+                atGlobalScreenPoint: resolution.globalScreenPoint,
+                activatingTargetApp: targetAppForActivePlan()
+            )
+
+            try? await Task.sleep(nanoseconds: 180_000_000)
+        } catch {
+            print("[Workflow] failed to focus text input target \"\(label)\": \(error.localizedDescription)")
+        }
+    }
     // MARK: - Non-Click Step Executors (Autopilot Only)
 
     private func executeOpenApplicationStep(
@@ -912,27 +960,34 @@ final class WorkflowRunner: ObservableObject {
             pause(.actionRequiresAutopilot(label: step.label ?? step.hint))
             return
         }
+
         let textToType = step.value ?? step.label
+
         guard let textToType, !textToType.isEmpty else {
             print("[Workflow] type step has no text — skipping")
             advanceUsingCachedHandlers(isPostClick: false)
             return
         }
 
-        let targetApp: NSRunningApplication? = {
-            guard let hint = activePlan?.app else { return nil }
-            return AccessibilityTreeResolver().runningAppMatching(hint: hint)
-        }()
         do {
+            await focusTargetForTextInputIfNeeded(
+                step: step,
+                operationToken: operationToken
+            )
+
+            guard operationToken == currentOperationToken else { return }
+
             try await ActionExecutor.shared.typeText(
                 textToType,
-                activatingTargetApp: targetApp
+                activatingTargetApp: targetAppForActivePlan()
             )
+
             guard operationToken == currentOperationToken else { return }
+
             advanceUsingCachedHandlers(isPostClick: false)
         } catch {
             print("[Workflow] type \"\(textToType.prefix(40))…\" failed: \(error.localizedDescription)")
-            currentStepResolutionFailureLabel = "type"
+            currentStepResolutionFailureLabel = step.label ?? "type"
         }
     }
 
@@ -944,24 +999,34 @@ final class WorkflowRunner: ObservableObject {
             pause(.actionRequiresAutopilot(label: step.value ?? step.label ?? step.hint))
             return
         }
+
         let valueToSet = step.value ?? step.label
+
         guard let valueToSet, !valueToSet.isEmpty else {
             print("[Workflow] setValue step has no value — skipping")
             advanceUsingCachedHandlers(isPostClick: false)
             return
         }
 
-        let targetApp = targetAppForActivePlan()
         do {
+            await focusTargetForTextInputIfNeeded(
+                step: step,
+                operationToken: operationToken
+            )
+
+            guard operationToken == currentOperationToken else { return }
+
             try await ActionExecutor.shared.setFocusedValue(
                 valueToSet,
-                activatingTargetApp: targetApp
+                activatingTargetApp: targetAppForActivePlan()
             )
+
             guard operationToken == currentOperationToken else { return }
+
             advanceUsingCachedHandlers(isPostClick: true)
         } catch {
             print("[Workflow] set value failed: \(error.localizedDescription)")
-            currentStepResolutionFailureLabel = valueToSet
+            currentStepResolutionFailureLabel = step.label ?? valueToSet
         }
     }
 

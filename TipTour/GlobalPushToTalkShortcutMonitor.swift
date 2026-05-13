@@ -34,7 +34,7 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         // refreshAllPermissions → start() every few seconds.
         guard globalEventTap == nil else { return }
 
-        let monitoredEventTypes: [CGEventType] = [.flagsChanged, .keyDown, .keyUp]
+        let monitoredEventTypes: [CGEventType] = [.flagsChanged]
         let eventMask = monitoredEventTypes.reduce(CGEventMask(0)) { currentMask, eventType in
             currentMask | (CGEventMask(1) << eventType.rawValue)
         }
@@ -110,12 +110,6 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
 
         let eventKeyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
 
-        // Escape key (keyCode 53) while a session is active stops the mic.
-        if eventType == .keyDown, eventKeyCode == PushToTalkShortcut.escapeKeyCode {
-            shortcutTransitionPublisher.send(.escapePressed)
-            return Unmanaged.passUnretained(event)
-        }
-
         let shortcutTransition = PushToTalkShortcut.shortcutTransition(
             for: eventType,
             keyCode: eventKeyCode,
@@ -132,8 +126,6 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         case .released:
             isShortcutCurrentlyPressed = false
             shortcutTransitionPublisher.send(.released)
-        case .escapePressed:
-            break
         }
 
         return Unmanaged.passUnretained(event)

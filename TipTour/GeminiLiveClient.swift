@@ -191,13 +191,13 @@ final class GeminiLiveClient: @unchecked Sendable {
                     ],
                     "steps": [
                         "type": "array",
-                        "description": "Ordered list of steps. First step MUST be visible on the current screen; later steps describe the path to take after clicking step 1.",
+                        "description": "Ordered list of steps. First step MUST be visible on the current screen; later steps describe the path to take after clicking step 1. For text entry, prefer a type or setValue step with label as the target field and value as the exact text. If the field may not be focused, emit the target field label so TipTour can focus it before typing.",
                         "items": [
                             "type": "object",
                             "properties": [
                                 "label": [
                                     "type": "string",
-                                    "description": "For click: literal visible text of the element, or nearest label for an icon. For openApp: app name, e.g. 'Safari'. For openURL: URL/path, e.g. 'https://apple.com' or '/Users/me/Desktop'. For keyboardShortcut: combo. For type: target field label, e.g. 'Note body'."
+                                    "description": "For click: literal visible text of the element, or nearest label for an icon. For openApp: app name, e.g. 'Safari'. For openURL: URL/path, e.g. 'https://apple.com' or '/Users/me/Desktop'. For keyboardShortcut: combo. For type and setValue: REQUIRED — the visible name of the target input field, e.g. 'Search', 'Address and search bar', 'Message', 'Note body', 'Email', 'Password'. TipTour clicks this field to focus it before typing. Do NOT put the text-to-enter in label; text goes in value."
                                 ],
                                 "type": [
                                     "type": "string",
@@ -223,7 +223,7 @@ final class GeminiLiveClient: @unchecked Sendable {
                                 ],
                                 "value": [
                                     "type": "string",
-                                    "description": "Value for setValue steps. For type steps, put the literal text to type here; use label only for the target field name."
+                                    "description": "For type and setValue steps: the exact text to enter into the target field. Required whenever type is 'type' or 'setValue'. The target field/control name belongs in label; the text content belongs in value."
                                 ],
                                 "direction": [
                                     "type": "string",

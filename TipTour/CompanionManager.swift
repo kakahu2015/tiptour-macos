@@ -930,14 +930,6 @@ final class CompanionManager: ObservableObject {
         case .released:
             // Release is a no-op — the session is toggled by hotkey PRESS.
             TipTourAnalytics.trackPushToTalkReleased()
-        case .escapePressed:
-            // Escape stops the session when it's active, and stops any
-            // running workflow. Does nothing when already idle.
-            guard voiceBackend.isActive || voiceBackend.isSuspended else { break }
-            WorkflowRunner.shared.stop()
-            voiceBackend.suspend()
-            voiceState = .idle
-            clearDetectedElementLocation()
         case .none:
             break
         }
@@ -1565,6 +1557,7 @@ final class CompanionManager: ObservableObject {
 
     LANGUAGE RULE (CRITICAL — read every time):
     the user may speak in ANY language. you respond in their language. but tool LABELS are different — they must EXACTLY match what is shown on the user's screen, in whatever language the UI is set to. you NEVER translate UI labels to match the user's spoken language.
+    NEVER mix scripts — if the user speaks Chinese, respond entirely in Chinese; if English, respond entirely in English. do NOT insert Korean, Japanese, or any other script into your spoken or transcribed output unless the user explicitly spoke that language.
 
     rule of thumb: a label that the user can SEE on their screen is the only label that resolves. if the marks say [menu:File], pass "File" — even if the user asked in Hindi or Spanish. if the marks say [menu:Archivo] (the user has a Spanish-localized macOS), pass "Archivo" — even if the user asked in English. literal screen text always wins.
 
@@ -1623,7 +1616,7 @@ final class CompanionManager: ObservableObject {
         use when no modifiers are involved.
 
       type: "type"
-        value = the literal text to type into the currently focused field. label may name the target field, like "Note body".
+        value = the literal text to type. label = the target input field name visible on screen (e.g. "Search", "Address and search bar", "Note body", "Message", "To"). ALWAYS set label to the field name — TipTour uses it to click and focus the field before typing. If you cannot see a label, set label to the nearest visible placeholder or field role. NEVER leave label empty on a type step.
         ONLY use after a step has focused a text field (clicking it, or a Cmd+N that opens a fresh field). NEVER chain two `type` steps — concatenate the text into one step instead.
         do NOT translate the text. if the user said "type 'on my way'", the value is exactly `on my way`, not the user's spoken language.
         if the user said to rewrite/change/delete/replace the current highlighted area, include targetContext:"currentHighlight" and type ONLY the replacement text in value.
