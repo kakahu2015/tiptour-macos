@@ -4,19 +4,14 @@
 //
 //  Single entry point for "where on screen should the cursor fly to?"
 //
-//  Tries two lookup strategies in order of reliability:
+//  Tries three lookup strategies in order of reliability:
 //    1. macOS Accessibility tree (~30ms, pixel-perfect when the app
 //       supports AX — almost all native Mac apps, most Cocoa third-party
 //       apps, and Electron apps that respect AXManualAccessibility).
-//    2. Raw Gemini-emitted box_2d coordinates as the absolute fallback.
+//    2. Browser DOM coordinates through CUA/CDP for Chromium web pages.
+//    3. Raw Gemini-emitted box_2d coordinates as the absolute fallback.
 //       These come from the same model that named the element, so they
 //       reflect Gemini's spatial intent for that exact tool call.
-//
-//  The on-device YOLO + OCR visual detector that previously sat between
-//  these two tiers has been removed: the model's box_2d output covers
-//  the same fallback role with strictly better accuracy (one model, one
-//  decision, no fuzzy text-match drift), and the YOLO weights carried
-//  AGPL-3 distribution constraints we no longer want to ship with.
 //
 //  The resolver returns a global AppKit screen coordinate so the cursor
 //  overlay can fly to it without further conversion.
@@ -30,6 +25,7 @@ final class ElementResolver: @unchecked Sendable {
     static let shared = ElementResolver()
 
     private let axResolver = AccessibilityTreeResolver()
+    private let browserCoordinateResolver = BrowserCoordinateResolver()
 
     // MARK: - Public Types
 
@@ -37,6 +33,7 @@ final class ElementResolver: @unchecked Sendable {
     /// telling the cursor what confidence to render with.
     enum ResolutionSource {
         case accessibilityTree       // AX tree gave us exact frame
+        case browserDOMCoordinates   // Browser DOM rect through CUA/CDP
         case llmRawCoordinates       // Straight from Gemini's box_2d, no refinement
     }
 
@@ -92,7 +89,7 @@ final class ElementResolver: @unchecked Sendable {
         capture: CompanionScreenCapture
     ) -> Resolution {
         let globalPoint = screenshotPixelToGlobalScreen(llmHintInScreenshotPixels, capture: capture)
-        print("[ElementResolver] ⚠ using raw LLM coords for \"\(label)\" → screen \(globalPoint)")
+        print("[ElementResolver] ⚠ using raw LLM coords for \"\(label)\" → screenshotPixel=\(llmHintInScreenshotPixels), capture=\(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels), displayFrame=\(capture.displayFrame), screen=\(globalPoint)")
         return Resolution(
             globalScreenPoint: globalPoint,
             displayFrame: capture.displayFrame,
@@ -131,24 +128,21 @@ final class ElementResolver: @unchecked Sendable {
         return nil
     }
 
-    /// Full resolution pipeline: AX → box_2d, tried in order with early
-    /// exit.
+    /// Full resolution pipeline: AX → browser DOM/CDP → box_2d, tried in order
+    /// with early exit.
     ///
     /// Tier order is deliberate:
     ///   1. AX tree first. Pixel-perfect when the app exposes one, and
     ///      it's the only path that gives us a real element rect for
     ///      the click detector to use as a tight hit region.
-    ///   2. Gemini's box_2d second. Those coordinates are the model's
-    ///      spatial output for the same query that emitted the label
-    ///      — one model, one decision. They reflect everything Gemini
-    ///      knew about the image at tool-call time: semantic
-    ///      understanding, disambiguation between same-text elements,
-    ///      and pixel grounding from a model trained natively on
-    ///      box_2d output.
+    ///   2. Browser DOM/CDP coordinates for Chromium pages.
+    ///   3. Gemini's box_2d as final fallback. Those coordinates are
+    ///      the same model's spatial output for the same query — they
+    ///      reflect everything Gemini knew at tool-call time.
     ///
-    /// If AX misses and Gemini didn't emit a box_2d, we have nothing
-    /// usable and return nil — the caller surfaces this to the user
-    /// rather than silently flying the cursor to a wrong location.
+    /// If every tier misses, we return nil — the caller surfaces this
+    /// to the user rather than silently flying the cursor somewhere
+    /// wrong.
     func resolve(
         label: String,
         llmHintInScreenshotPixels: CGPoint?,
@@ -204,12 +198,34 @@ final class ElementResolver: @unchecked Sendable {
             }
         }
 
+        // 2. Browser DOM/CDP coordinates. Chrome and other Chromium
+        //    pages can expose better geometry through the page itself
+        //    than through the macOS AX tree, especially for template
+        //    cards and heavily styled web controls.
+        if let browserResolution = await browserCoordinateResolver.resolve(
+            label: label,
+            targetAppHint: targetAppHint
+        ) {
+            let displayFrame = await MainActor.run {
+                displayFrameContaining(browserResolution.globalScreenPoint)
+                    ?? NSScreen.main?.frame
+                    ?? .zero
+            }
+            return Resolution(
+                globalScreenPoint: browserResolution.globalScreenPoint,
+                displayFrame: displayFrame,
+                label: browserResolution.matchedLabel,
+                source: .browserDOMCoordinates,
+                globalScreenRect: browserResolution.globalScreenRect
+            )
+        }
+
         guard let capture = latestCapture else {
             print("[ElementResolver] ✗ no AX match and no screenshot capture — giving up on \"\(label)\"")
             return nil
         }
 
-        // 2. Trust the model's box_2d when it gave us one. This is
+        // 3. Trust the model's box_2d when it gave us one. This is
         //    Gemini's spatial output for the same query that emitted
         //    the label — one model, one decision.
         if let hint = llmHintInScreenshotPixels {

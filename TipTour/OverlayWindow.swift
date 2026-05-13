@@ -52,19 +52,33 @@ class OverlayWindow: NSWindow {
     }
 }
 
-// Cursor-like triangle shape (equilateral)
-struct Triangle: Shape {
+// Lucide mouse-pointer-2 shape from
+// /Users/milindsoni/Documents/mywork/tip-tour/.agents/mouse-pointer-2.svg.
+// Ported into SwiftUI so the macOS app uses the same cursor silhouette
+// as the web TipTour project.
+struct CursorArrowShape: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()
-        let size = min(rect.width, rect.height)
-        let height = size * sqrt(3.0) / 2.0
+        let viewBoxSize: CGFloat = 24
+        let scale = min(rect.width, rect.height) / viewBoxSize
+        let originX = rect.midX - (viewBoxSize * scale / 2)
+        let originY = rect.midY - (viewBoxSize * scale / 2)
 
-        // Top vertex
-        path.move(to: CGPoint(x: rect.midX, y: rect.midY - height / 1.5))
-        // Bottom left vertex
-        path.addLine(to: CGPoint(x: rect.midX - size / 2, y: rect.midY + height / 3))
-        // Bottom right vertex
-        path.addLine(to: CGPoint(x: rect.midX + size / 2, y: rect.midY + height / 3))
+        func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+            CGPoint(
+                x: originX + x * scale,
+                y: originY + y * scale
+            )
+        }
+
+        path.move(to: point(4.037, 4.688))
+        path.addQuadCurve(to: point(4.688, 4.037), control: point(3.90, 3.90))
+        path.addLine(to: point(20.688, 10.537))
+        path.addQuadCurve(to: point(20.625, 11.484), control: point(21.42, 10.84))
+        path.addLine(to: point(14.501, 13.064))
+        path.addQuadCurve(to: point(13.063, 14.499), control: point(13.43, 13.34))
+        path.addLine(to: point(11.484, 20.625))
+        path.addQuadCurve(to: point(10.537, 20.688), control: point(11.17, 21.42))
         path.closeSubpath()
         return path
     }
@@ -82,6 +96,82 @@ struct NavigationBubbleSizePreferenceKey: PreferenceKey {
     static var defaultValue: CGSize = .zero
     static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
         value = nextValue()
+    }
+}
+
+private struct FocusHighlightBrushView: View {
+    let screenFrame: CGRect
+    let activeGlobalPoints: [CGPoint]
+    let committedContext: FocusHighlightContext?
+
+    var body: some View {
+        Canvas { context, _ in
+            drawCommittedRegion(in: context)
+            drawActiveStroke(in: context)
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func drawActiveStroke(in context: GraphicsContext) {
+        let localPoints = activeGlobalPoints
+            .filter { screenFrame.insetBy(dx: -24, dy: -24).contains($0) }
+            .map(localPoint)
+
+        guard localPoints.count >= 2 else { return }
+
+        var path = Path()
+        path.move(to: localPoints[0])
+        for point in localPoints.dropFirst() {
+            path.addLine(to: point)
+        }
+
+        context.stroke(
+            path,
+            with: .color(DS.Colors.overlayCursorBlue.opacity(0.28)),
+            style: StrokeStyle(lineWidth: 28, lineCap: .round, lineJoin: .round)
+        )
+        context.stroke(
+            path,
+            with: .color(Color.white.opacity(0.22)),
+            style: StrokeStyle(lineWidth: 10, lineCap: .round, lineJoin: .round)
+        )
+        context.stroke(
+            path,
+            with: .color(DS.Colors.overlayCursorBlue.opacity(0.75)),
+            style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round)
+        )
+    }
+
+    private func drawCommittedRegion(in context: GraphicsContext) {
+        guard let committedContext else { return }
+
+        let intersection = committedContext.globalAppKitBoundingRect.intersection(screenFrame)
+        guard !intersection.isNull, intersection.width > 0, intersection.height > 0 else { return }
+
+        let localRect = CGRect(
+            x: intersection.minX - screenFrame.minX,
+            y: screenFrame.height - (intersection.maxY - screenFrame.minY),
+            width: intersection.width,
+            height: intersection.height
+        )
+        let roundedRect = Path(roundedRect: localRect, cornerRadius: 12)
+
+        context.fill(
+            roundedRect,
+            with: .color(DS.Colors.overlayCursorBlue.opacity(0.10))
+        )
+        context.stroke(
+            roundedRect,
+            with: .color(DS.Colors.overlayCursorBlue.opacity(0.70)),
+            style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round, dash: [7, 5])
+        )
+    }
+
+    private func localPoint(from globalPoint: CGPoint) -> CGPoint {
+        CGPoint(
+            x: globalPoint.x - screenFrame.minX,
+            y: screenFrame.height - (globalPoint.y - screenFrame.minY)
+        )
     }
 }
 
@@ -150,9 +240,10 @@ struct BlueCursorView: View {
     /// The buddy's current behavioral mode (following cursor, navigating, or pointing).
     @State private var buddyNavigationMode: BuddyNavigationMode = .followingCursor
 
-    /// The rotation angle of the triangle in degrees. Default is -35° (cursor-like).
+    /// The rotation angle of the arrow in degrees. The Lucide cursor
+    /// shape already points up-left at 0°.
     /// Changes to face the direction of travel when navigating to a target.
-    @State private var triangleRotationDegrees: Double = -35.0
+    @State private var triangleRotationDegrees: Double = 0.0
 
     /// Speech bubble text shown when pointing at a detected element.
     @State private var navigationBubbleText: String = ""
@@ -190,6 +281,15 @@ struct BlueCursorView: View {
     /// wisp, short enough to keep the effect subtle and hug the buddy closely.
     private let maximumFlightTrailPointCount: Int = 22
 
+    /// Rolling movement trail shown behind the default arrow while the
+    /// voice session is active and the user moves the mouse. This is
+    /// separate from `flightTrailPoints`, which belongs to programmatic
+    /// cursor flights toward resolved UI elements.
+    @State private var followingTrailPoints: [CGPoint] = []
+
+    private let maximumFollowingTrailPointCount: Int = 50
+    @State private var followingTrailFramesWithoutMovement: Int = 0
+
     /// Opacity of the entire fencing trail overlay. Held at 1.0 during flight
     /// and animated to 0.0 over ~0.3s after landing for a smooth dissolve.
     @State private var flightTrailOpacity: Double = 0.0
@@ -209,6 +309,22 @@ struct BlueCursorView: View {
         ZStack {
             // Nearly transparent background (helps with compositing)
             Color.black.opacity(0.001)
+
+            FocusHighlightBrushView(
+                screenFrame: screenFrame,
+                activeGlobalPoints: companionManager.isFocusHighlightActive
+                    ? companionManager.focusHighlightGlobalPoints
+                    : [],
+                committedContext: nil
+            )
+
+            if !companionManager.isNekoModeEnabled
+                && companionManager.globalPushToTalkShortcutMonitor.isShortcutCurrentlyPressed
+                && buddyNavigationMode == .followingCursor {
+                CursorStreakTrailView(trailPoints: followingTrailPoints)
+                    .opacity(buddyIsVisibleOnThisScreen ? cursorOpacity : 0)
+                    .allowsHitTesting(false)
+            }
 
             // Welcome speech bubble (first launch only)
             if isCursorOnThisScreen && showWelcome && !welcomeText.isEmpty {
@@ -311,32 +427,24 @@ struct BlueCursorView: View {
                     }
             }
 
-            // Trail rendered BEHIND the cursor during a bezier flight.
-            // In Neko mode we leave paw-print footprints behind the
-            // running cat; default mode uses the olympic-fencing glow.
-            Group {
-                if companionManager.isNekoModeEnabled {
-                    PawPrintTrailView(trailPoints: flightTrailPoints)
-                } else {
-                    ZStack {
-                        FencingTrailView(trailPoints: flightTrailPoints)
-                            .blur(radius: 3)
-                            .opacity(0.35)
-                        FencingTrailView(trailPoints: flightTrailPoints)
-                            .opacity(0.55)
-                    }
-                }
+            // Trail rendered BEHIND the buddy during a programmatic bezier
+            // flight. Neko mode still leaves paw-print footprints behind
+            // the running cat. The default-mode glow trail was removed —
+            // during a flight to a UI element the buddy alone communicates
+            // intent and the trailing line was noisy / distracting.
+            if companionManager.isNekoModeEnabled {
+                PawPrintTrailView(trailPoints: flightTrailPoints)
+                    .opacity(flightTrailOpacity)
+                    .allowsHitTesting(false)
             }
-            .opacity(flightTrailOpacity)
-            .allowsHitTesting(false)
 
-            // Blue triangle cursor — shown when idle or while TTS is playing (responding).
-            // All three states (triangle, waveform, spinner) stay in the view tree
+            // Default arrow cursor — shown when idle or while TTS is playing (responding).
+            // All three states (arrow, waveform, spinner) stay in the view tree
             // permanently and cross-fade via opacity so SwiftUI doesn't remove/re-insert
             // them (which caused a visible cursor "pop").
             //
             // During cursor following: fast spring animation for snappy tracking.
-            // Neko mode swaps the blue triangle for a pixel-art cat
+            // Neko mode swaps the arrow for a pixel-art cat
             // that picks its own directional sprite from the cursor's
             // velocity and animates a 2-frame run cycle. Behavior is
             // unchanged — purely a visual personality toggle.
@@ -355,12 +463,25 @@ struct BlueCursorView: View {
             } else {
                 // During navigation: NO implicit animation — the frame-by-frame bezier
                 // timer controls position directly at 60fps for a smooth arc flight.
-                Triangle()
-                    .fill(DS.Colors.overlayCursorBlue)
-                    .frame(width: 16, height: 16)
+                ZStack {
+                    CursorArrowShape()
+                        .fill(DS.Colors.overlayCursorBlue)
+                        .blur(radius: 16)
+                        .opacity(0.32)
+                    CursorArrowShape()
+                        .fill(DS.Colors.overlayCursorBlue)
+                        .blur(radius: 6)
+                        .opacity(0.38)
+                    CursorArrowShape()
+                        .fill(Color.white)
+                    CursorArrowShape()
+                        .stroke(
+                            DS.Colors.overlayCursorBlue,
+                            style: StrokeStyle(lineWidth: 4.2, lineCap: .round, lineJoin: .round)
+                        )
+                }
+                    .frame(width: 44, height: 44)
                     .rotationEffect(.degrees(triangleRotationDegrees))
-                    .shadow(color: DS.Colors.overlayCursorBlue, radius: 8 + (buddyFlightScale - 1.0) * 20, x: 0, y: 0)
-                    .scaleEffect(buddyFlightScale)
                     .opacity(buddyIsVisibleOnThisScreen ? cursorOpacity : 0)
                     .scaleEffect(buddyFlightScale)
                     .position(cursorPosition)
@@ -377,10 +498,9 @@ struct BlueCursorView: View {
                     )
             }
 
-            // Blue waveform — floats next to the cursor and stays visible
-            // through both listening and responding states, unless a pointing
-            // label bubble is showing (in which case we hide it so it doesn't
-            // overlap the label).
+            // Audio/transcript pill — floats next to the cursor and stays
+            // visible through both listening and responding states, unless
+            // a pointing label bubble is showing.
             let waveformIsVisible: Bool = {
                 guard buddyIsVisibleOnThisScreen else { return false }
                 if companionManager.detectedElementScreenLocation != nil {
@@ -390,11 +510,27 @@ struct BlueCursorView: View {
                     || companionManager.voiceState == .responding
             }()
 
-            // Offset to the right and down from the arrow tip so both
-            // elements are clearly visible at once.
-            let waveformPosition = CGPoint(x: cursorPosition.x + 22, y: cursorPosition.y + 16)
+            // The pill's intrinsic width varies with transcript text length.
+            // To keep its LEFT edge pinned at a constant offset to the right
+            // of the cursor regardless of width, we content-size the pill
+            // with `.fixedSize()` and place it inside a wider leading-aligned
+            // outer frame. `.position` then anchors the outer frame, while
+            // the pill remains flush against that frame's leading edge — so
+            // its left edge sits a constant distance to the right of the
+            // cursor no matter what the transcript says.
+            let pillOuterFrameWidth: CGFloat = 240
+            let pillLeftEdgeOffsetFromCursorCenter: CGFloat = 30
+            let waveformPosition = CGPoint(
+                x: cursorPosition.x + pillLeftEdgeOffsetFromCursorCenter + pillOuterFrameWidth / 2,
+                y: cursorPosition.y
+            )
 
-            BlueCursorWaveformView(audioPowerLevel: companionManager.currentAudioPowerLevel)
+            BlueCursorWaveformView(
+                audioPowerLevel: companionManager.currentAudioPowerLevel,
+                transcript: companionManager.lastTranscript
+            )
+                .fixedSize()
+                .frame(width: pillOuterFrameWidth, height: 36, alignment: .leading)
                 .opacity(waveformIsVisible ? cursorOpacity : 0)
                 .position(waveformPosition)
                 .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: waveformPosition)
@@ -508,7 +644,62 @@ struct BlueCursorView: View {
             let swiftUIPosition = self.convertScreenPointToSwiftUICoordinates(mouseLocation)
             let buddyX = swiftUIPosition.x + 35
             let buddyY = swiftUIPosition.y + 25
-            self.cursorPosition = CGPoint(x: buddyX, y: buddyY)
+            let nextCursorPosition = CGPoint(x: buddyX, y: buddyY)
+            self.updateFollowingTrail(nextCursorPosition: nextCursorPosition)
+            self.cursorPosition = nextCursorPosition
+        }
+    }
+
+    private func updateFollowingTrail(nextCursorPosition: CGPoint) {
+        guard !companionManager.isNekoModeEnabled,
+              companionManager.globalPushToTalkShortcutMonitor.isShortcutCurrentlyPressed,
+              isCursorOnThisScreen,
+              buddyNavigationMode == .followingCursor else {
+            followingTrailPoints.removeAll()
+            followingTrailFramesWithoutMovement = 0
+            return
+        }
+
+        let previousPoint = followingTrailPoints.last ?? cursorPosition
+
+        let movementDistance = hypot(
+            nextCursorPosition.x - previousPoint.x,
+            nextCursorPosition.y - previousPoint.y
+        )
+
+        if movementDistance > 3.0 {
+            followingTrailFramesWithoutMovement = 0
+
+            // EMA-smooth the recorded position toward the raw sample. The
+            // 60Hz cursor sampling timer runs on the main RunLoop, which
+            // also services Gemini Live's audio chunk dispatches and JPEG
+            // screenshot encoding during an active voice session. Those
+            // bursts of main-thread work delay the timer just enough that
+            // raw samples come in at uneven intervals, and Catmull-Rom
+            // tangents amplify the irregular spacing into a visible
+            // mid-curve wobble. Smoothing the inputs before they land in
+            // the trail buffer hides that timing noise behind a small
+            // amount of lag — fine for a trail that's meant to read as
+            // "behind the cursor" anyway. The cursor sprite itself is
+            // unaffected and stays locked to the real mouse position.
+            let emaSmoothingCoefficient: CGFloat = 0.45
+            let smoothedNextCursorPosition = CGPoint(
+                x: previousPoint.x + (nextCursorPosition.x - previousPoint.x) * emaSmoothingCoefficient,
+                y: previousPoint.y + (nextCursorPosition.y - previousPoint.y) * emaSmoothingCoefficient
+            )
+
+            followingTrailPoints.append(smoothedNextCursorPosition)
+            if followingTrailPoints.count > maximumFollowingTrailPointCount {
+                followingTrailPoints.removeFirst(
+                    followingTrailPoints.count - maximumFollowingTrailPointCount
+                )
+            }
+            return
+        }
+
+        followingTrailFramesWithoutMovement += 1
+        if followingTrailFramesWithoutMovement > 5, !followingTrailPoints.isEmpty {
+            followingTrailPoints.removeFirst()
         }
     }
 
@@ -559,7 +750,7 @@ struct BlueCursorView: View {
     }
 
     /// Animates the buddy along a quadratic bezier arc from its current position
-    /// to the specified destination. The triangle rotates to face its direction
+    /// to the specified destination. The arrow rotates to face its direction
     /// of travel (tangent to the curve) each frame, scales up at the midpoint
     /// for a "swooping" feel, and the glow intensifies during flight.
     private func animateBezierFlightArc(
@@ -641,9 +832,10 @@ struct BlueCursorView: View {
                          + 2.0 * t * (endPosition.x - controlPoint.x)
             let tangentY = 2.0 * oneMinusT * (controlPoint.y - startPosition.y)
                          + 2.0 * t * (endPosition.y - controlPoint.y)
-            // +90° offset because the triangle's "tip" points up at 0° rotation,
-            // and atan2 returns 0° for rightward movement
-            self.triangleRotationDegrees = atan2(tangentY, tangentX) * (180.0 / .pi) + 90.0
+            // +135° offset because the Lucide cursor's tip points
+            // up-left at 0° rotation, while atan2 returns 0° for
+            // rightward movement.
+            self.triangleRotationDegrees = atan2(tangentY, tangentX) * (180.0 / .pi) + 135.0
 
             // Scale pulse: sin curve peaks at midpoint of the flight.
             // Buddy grows to ~1.3x at the apex, then shrinks back to 1.0x on landing.
@@ -684,7 +876,7 @@ struct BlueCursorView: View {
         buddyNavigationMode = .pointingAtTarget
 
         // Rotate back to default pointer angle now that we've arrived
-        triangleRotationDegrees = -35.0
+        triangleRotationDegrees = 0.0
 
         // Reset navigation bubble state — start small for the scale-bounce entrance
         navigationBubbleText = ""
@@ -776,7 +968,7 @@ struct BlueCursorView: View {
         navigationAnimationTimer = nil
         buddyNavigationMode = .followingCursor
         isReturningToCursor = false
-        triangleRotationDegrees = -35.0
+        triangleRotationDegrees = 0.0
         buddyFlightScale = 1.0
         navigationBubbleText = ""
         navigationBubbleOpacity = 0.0
@@ -820,89 +1012,310 @@ struct BlueCursorView: View {
 // MARK: - Fencing Trail
 
 /// Olympic-fencing-broadcast-style glowing trail rendered behind the buddy
-/// triangle during a bezier flight. Each consecutive pair of points in
-/// `trailPoints` is stroked as a short line segment, with older segments
-/// thinner and more transparent than newer ones — producing a comet-tail
-/// taper that ends in a bright head right at the buddy's current position.
-///
-/// The view is backed by a SwiftUI `Canvas` so all segments are drawn in a
-/// single pass, which stays cheap even when the trail buffer is full.
-/// The caller applies a secondary blurred copy on top for the bloom/plasma
-/// glow effect; this view itself draws only crisp strokes.
+/// during a programmatic bezier flight toward a resolved UI element.
+/// Same single-continuous-path + layered-blur recipe as the highlighter
+/// trail, but tuned thinner and quieter so it reads as a wispy comet tail
+/// behind the buddy instead of a chunky marker stroke.
 struct FencingTrailView: View {
     let trailPoints: [CGPoint]
 
     var body: some View {
-        Canvas { graphicsContext, canvasSize in
+        ZStack {
+            buildUniformFlightTrailLayer(
+                lineWidth: 22.0,
+                strokeOpacity: 0.07,
+                postBlurRadius: 16
+            )
+
+            buildUniformFlightTrailLayer(
+                lineWidth: 12.0,
+                strokeOpacity: 0.16,
+                postBlurRadius: 6
+            )
+
+            buildUniformFlightTrailLayer(
+                lineWidth: 5.5,
+                strokeOpacity: 0.34,
+                postBlurRadius: 0
+            )
+        }
+    }
+
+    /// One stroke pass over the entire smoothed flight-trail path at a
+    /// constant width and constant opacity, followed by a uniform blur for
+    /// the layer's glow halo. Single-stroke-per-layer prevents the bead
+    /// artifacts that a per-segment approach produces at junctions.
+    private func buildUniformFlightTrailLayer(
+        lineWidth: CGFloat,
+        strokeOpacity: Double,
+        postBlurRadius: CGFloat
+    ) -> some View {
+        Canvas { graphicsContext, _ in
             guard trailPoints.count > 1 else { return }
 
-            let totalSegmentCount = trailPoints.count - 1
-            for segmentIndex in 0..<totalSegmentCount {
-                let segmentStartPoint = trailPoints[segmentIndex]
-                let segmentEndPoint = trailPoints[segmentIndex + 1]
+            let continuousSmoothFlightTrailPath = buildContinuousSmoothTrailPath(
+                trailPoints: trailPoints
+            )
 
-                // ageProgress: 0.0 for the oldest segment (tail tip), 1.0 for
-                // the newest segment (right behind the buddy). Cubed so the
-                // tail fades into nothing very quickly — keeps the trail
-                // feeling like a soft wisp rather than a hard streak.
-                let ageProgress = Double(segmentIndex) / Double(max(totalSegmentCount - 1, 1))
-                let taperFactor = ageProgress * ageProgress * ageProgress
+            graphicsContext.stroke(
+                continuousSmoothFlightTrailPath,
+                with: .color(DS.Colors.overlayCursorBlue.opacity(strokeOpacity)),
+                style: StrokeStyle(
+                    lineWidth: lineWidth,
+                    lineCap: .round,
+                    lineJoin: .round
+                )
+            )
+        }
+        .blur(radius: postBlurRadius)
+    }
+}
 
-                let outerGlowLineWidth = 1.2 + taperFactor * 5.0
+/// Builds one continuous smooth path that flows through every point in
+/// `trailPoints` using centripetal Catmull-Rom-derived cubic Bezier
+/// segments. Each consecutive pair of points becomes a cubic curve whose
+/// control points are taken from the two neighboring points, which gives
+/// C1 continuity across the whole trail.
+///
+/// Drawing the trail as ONE continuous path that we stroke a single time
+/// per layer is what removes the visible "beads" along the curve. The
+/// previous implementation stroked every segment as its own path with
+/// `lineCap: .round`, and adjacent caps with slightly different widths
+/// stacked into visible dots — building one path and stroking it once
+/// eliminates that artifact entirely.
+///
+/// For the first segment we reuse `trailPoints[0]` itself as the missing
+/// previous neighbor; for the last segment we reuse `trailPoints.last`
+/// for the missing next neighbor. That keeps the curve passing exactly
+/// through both endpoints.
+private func buildContinuousSmoothTrailPath(trailPoints: [CGPoint]) -> Path {
+    var continuousTrailPath = Path()
+    guard trailPoints.count > 1 else { return continuousTrailPath }
 
-                var segmentPath = Path()
-                segmentPath.move(to: segmentStartPoint)
-                segmentPath.addLine(to: segmentEndPoint)
+    if trailPoints.count == 2 {
+        continuousTrailPath.move(to: trailPoints[0])
+        continuousTrailPath.addLine(to: trailPoints[1])
+        return continuousTrailPath
+    }
 
-                // Single soft blue stroke — no bright white core. The wrapping
-                // ZStack in the caller adds a gentle blurred copy underneath
-                // for subtle bloom; we keep this layer intentionally quiet.
+    continuousTrailPath.move(to: trailPoints[0])
+    let lastTrailPointIndex = trailPoints.count - 1
+
+    for segmentIndex in 0..<lastTrailPointIndex {
+        let segmentStartPoint = trailPoints[segmentIndex]
+        let segmentEndPoint = trailPoints[segmentIndex + 1]
+
+        let pointBeforeSegmentStart = segmentIndex == 0
+            ? trailPoints[0]
+            : trailPoints[segmentIndex - 1]
+        let pointAfterSegmentEnd = (segmentIndex + 2) <= lastTrailPointIndex
+            ? trailPoints[segmentIndex + 2]
+            : trailPoints[lastTrailPointIndex]
+
+        let tangentAtSegmentStart = CGPoint(
+            x: (segmentEndPoint.x - pointBeforeSegmentStart.x) / 2.0,
+            y: (segmentEndPoint.y - pointBeforeSegmentStart.y) / 2.0
+        )
+        let tangentAtSegmentEnd = CGPoint(
+            x: (pointAfterSegmentEnd.x - segmentStartPoint.x) / 2.0,
+            y: (pointAfterSegmentEnd.y - segmentStartPoint.y) / 2.0
+        )
+
+        let firstCubicControlPoint = CGPoint(
+            x: segmentStartPoint.x + tangentAtSegmentStart.x / 3.0,
+            y: segmentStartPoint.y + tangentAtSegmentStart.y / 3.0
+        )
+        let secondCubicControlPoint = CGPoint(
+            x: segmentEndPoint.x - tangentAtSegmentEnd.x / 3.0,
+            y: segmentEndPoint.y - tangentAtSegmentEnd.y / 3.0
+        )
+
+        continuousTrailPath.addCurve(
+            to: segmentEndPoint,
+            control1: firstCubicControlPoint,
+            control2: secondCubicControlPoint
+        )
+    }
+
+    return continuousTrailPath
+}
+
+/// Thick blue highlighter-style trail rendered behind the cursor while a
+/// voice session is active. Looks like a fat blue marker stroke with a
+/// soft glow around it, fading smoothly into the background at the tail.
+///
+/// Each visual layer (halo / bloom / core) is drawn by stroking many short
+/// `trimmedPath` slices of the same continuous Catmull-Rom-smoothed path,
+/// where each slice gets its own opacity along a tail→head ramp. Using
+/// butt caps means the slices abut without overlap, so the opacity
+/// transitions stay clean — no beads at junctions, no width-mismatch
+/// artifacts. Quadratic easing concentrates the fade near the tail so
+/// most of the trail stays saturated and only the last segment softly
+/// dissolves, matching the highlighter aesthetic of the reference.
+struct CursorStreakTrailView: View {
+    let trailPoints: [CGPoint]
+
+    var body: some View {
+        ZStack {
+            buildSoftFadingTrailLayer(
+                lineWidth: 54.0,
+                maxStrokeOpacity: 0.11,
+                postBlurRadius: 30
+            )
+
+            buildSoftFadingTrailLayer(
+                lineWidth: 32.0,
+                maxStrokeOpacity: 0.26,
+                postBlurRadius: 12
+            )
+
+            buildSoftFadingTrailLayer(
+                lineWidth: 18.0,
+                maxStrokeOpacity: 0.72,
+                postBlurRadius: 0
+            )
+        }
+    }
+
+    /// Number of butt-capped slices used to approximate a smooth opacity
+    /// gradient along the trail. Higher values give a smoother fade but
+    /// more strokes per frame; 28 is enough that the opacity steps blur
+    /// out invisibly after the layer's Gaussian blur is applied.
+    private let opacityFadeBandCount: Int = 28
+
+    /// Strokes the trail as a stack of constant-width slices along the
+    /// smoothed path. Slice opacity ramps from 0 at the tail to
+    /// `maxStrokeOpacity` at the head, on a quadratic curve so the fade
+    /// is concentrated at the very tail and the rest of the trail stays
+    /// fully saturated — that's what produces the highlighter look
+    /// where the marker dissolves softly into nothing.
+    private func buildSoftFadingTrailLayer(
+        lineWidth: CGFloat,
+        maxStrokeOpacity: Double,
+        postBlurRadius: CGFloat
+    ) -> some View {
+        Canvas { graphicsContext, _ in
+            guard trailPoints.count > 1 else { return }
+
+            let continuousSmoothTrailPath = buildContinuousSmoothTrailPath(
+                trailPoints: trailPoints
+            )
+
+            for bandIndex in 0..<opacityFadeBandCount {
+                let bandStartFraction = Double(bandIndex) / Double(opacityFadeBandCount)
+                let bandEndFraction = Double(bandIndex + 1) / Double(opacityFadeBandCount)
+                let bandCenterFraction = (bandStartFraction + bandEndFraction) / 2.0
+
+                // 0.0 at the tail (oldest sample), 1.0 at the head
+                // (newest, right behind the cursor). The 1.8 exponent
+                // pushes most of the fade into the last ~30% of the
+                // trail length so the marker dissolves only at its end.
+                let fadeAlongTrail = pow(bandCenterFraction, 1.8)
+                let bandStrokeOpacity = maxStrokeOpacity * fadeAlongTrail
+
+                let bandPath = continuousSmoothTrailPath.trimmedPath(
+                    from: bandStartFraction,
+                    to: bandEndFraction
+                )
+
                 graphicsContext.stroke(
-                    segmentPath,
-                    with: .color(DS.Colors.overlayCursorBlue.opacity(taperFactor * 0.28)),
-                    style: StrokeStyle(lineWidth: outerGlowLineWidth, lineCap: .round)
+                    bandPath,
+                    with: .color(DS.Colors.overlayCursorBlue.opacity(bandStrokeOpacity)),
+                    style: StrokeStyle(
+                        lineWidth: lineWidth,
+                        lineCap: .butt,
+                        lineJoin: .round
+                    )
                 )
             }
         }
+        .blur(radius: postBlurRadius)
     }
 }
 
 // MARK: - Blue Cursor Waveform
 
-/// A small blue waveform that replaces the triangle cursor while
-/// the user is holding the push-to-talk shortcut and speaking.
+/// Light-blue speech pill that shows a compact audio animation plus
+/// Gemini Live's incremental user transcript.
 private struct BlueCursorWaveformView: View {
     let audioPowerLevel: CGFloat
+    let transcript: String?
 
-    private let barCount = 5
-    private let listeningBarProfile: [CGFloat] = [0.4, 0.7, 1.0, 0.7, 0.4]
+    private var displayTranscript: String {
+        let trimmedTranscript = (transcript ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\n", with: " ")
+
+        guard !trimmedTranscript.isEmpty else {
+            return "Listening"
+        }
+
+        let maximumCharacterCount = 34
+        if trimmedTranscript.count <= maximumCharacterCount {
+            return trimmedTranscript
+        }
+        return String(trimmedTranscript.suffix(maximumCharacterCount))
+    }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 36.0)) { timelineContext in
-            HStack(alignment: .center, spacing: 2) {
-                ForEach(0..<barCount, id: \.self) { barIndex in
-                    RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                        .fill(DS.Colors.overlayCursorBlue)
-                        .frame(
-                            width: 2,
-                            height: barHeight(
-                                for: barIndex,
-                                timelineDate: timelineContext.date
-                            )
-                        )
-                }
+        HStack(alignment: .center, spacing: 9) {
+            MiniAudioGlyph(audioPowerLevel: audioPowerLevel)
+
+            Text(displayTranscript)
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundColor(DS.Colors.overlayCursorBlue)
+                .lineLimit(1)
+                .truncationMode(.head)
+                .frame(minWidth: 70, maxWidth: 180, alignment: .leading)
+        }
+        .padding(.leading, 14)
+        .padding(.trailing, 16)
+        .frame(height: 34)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color(red: 0.90, green: 0.94, blue: 1.0).opacity(0.96))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(DS.Colors.overlayCursorBlue, lineWidth: 1.4)
+        )
+        .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.16), radius: 8, x: 0, y: 3)
+        .animation(.linear(duration: 0.08), value: audioPowerLevel)
+    }
+}
+
+private struct MiniAudioGlyph: View {
+    let audioPowerLevel: CGFloat
+
+    private let barProfile: [CGFloat] = [0.45, 1.0, 0.78]
+    @State private var isPulsing = false
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 3) {
+            ForEach(0..<3, id: \.self) { barIndex in
+                Capsule(style: .continuous)
+                    .fill(DS.Colors.overlayCursorBlue.opacity(barIndex == 0 ? 0.42 : 1.0))
+                    .frame(
+                        width: 3,
+                        height: barHeight(for: barIndex)
+                    )
             }
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.6), radius: 6, x: 0, y: 0)
-            .animation(.linear(duration: 0.08), value: audioPowerLevel)
+        }
+        .frame(width: 18, height: 18)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.48).repeatForever(autoreverses: true)) {
+                isPulsing = true
+            }
         }
     }
 
-    private func barHeight(for barIndex: Int, timelineDate: Date) -> CGFloat {
-        let animationPhase = CGFloat(timelineDate.timeIntervalSinceReferenceDate * 3.6) + CGFloat(barIndex) * 0.35
+    private func barHeight(for barIndex: Int) -> CGFloat {
         let normalizedAudioPowerLevel = max(audioPowerLevel - 0.008, 0)
         let easedAudioPowerLevel = pow(min(normalizedAudioPowerLevel * 2.85, 1), 0.76)
-        let reactiveHeight = easedAudioPowerLevel * 10 * listeningBarProfile[barIndex]
-        let idlePulse = (sin(animationPhase) + 1) / 2 * 1.5
+        let reactiveHeight = easedAudioPowerLevel * 11 * barProfile[barIndex]
+        let idlePulse = isPulsing
+            ? CGFloat([1.0, 0.15, 0.65][barIndex]) * 1.8
+            : CGFloat([0.15, 1.0, 0.35][barIndex]) * 1.8
         return 3 + reactiveHeight + idlePulse
     }
 }
@@ -1003,5 +1416,3 @@ class OverlayWindowManager {
         return !overlayWindows.isEmpty
     }
 }
-
-

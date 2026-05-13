@@ -103,33 +103,49 @@ final class MenuBarPanelManager: NSObject {
         button.target = self
     }
 
-    /// Draws the TipTour triangle as a menu bar icon. Uses the same shape
-    /// and rotation as the in-app cursor so the menu bar icon matches.
+    /// Draws the same pointer silhouette used by the overlay cursor.
     private func makeMenuBarIcon() -> NSImage {
         let iconSize: CGFloat = 18
         let image = NSImage(size: NSSize(width: iconSize, height: iconSize))
         image.lockFocus()
 
-        let triangleSize = iconSize * 0.7
-        let cx = iconSize * 0.50
-        let cy = iconSize * 0.50
-        let height = triangleSize * sqrt(3.0) / 2.0
+        let viewBoxSize: CGFloat = 24
+        let scale = iconSize * 0.78 / viewBoxSize
+        let originX = iconSize * 0.5 - viewBoxSize * scale * 0.5
+        let originY = iconSize * 0.5 - viewBoxSize * scale * 0.5
 
-        let top = CGPoint(x: cx, y: cy + height / 1.5)
-        let bottomLeft = CGPoint(x: cx - triangleSize / 2, y: cy - height / 3)
-        let bottomRight = CGPoint(x: cx + triangleSize / 2, y: cy - height / 3)
-
-        let angle = 35.0 * .pi / 180.0
-        func rotate(_ point: CGPoint) -> CGPoint {
-            let dx = point.x - cx, dy = point.y - cy
-            let cosA = CGFloat(cos(angle)), sinA = CGFloat(sin(angle))
-            return CGPoint(x: cx + cosA * dx - sinA * dy, y: cy + sinA * dx + cosA * dy)
+        func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+            CGPoint(
+                x: originX + x * scale,
+                y: originY + (viewBoxSize - y) * scale
+            )
         }
 
         let path = NSBezierPath()
-        path.move(to: rotate(top))
-        path.line(to: rotate(bottomLeft))
-        path.line(to: rotate(bottomRight))
+        path.move(to: point(4.037, 4.688))
+        path.curve(
+            to: point(4.688, 4.037),
+            controlPoint1: point(3.90, 3.90),
+            controlPoint2: point(3.90, 3.90)
+        )
+        path.line(to: point(20.688, 10.537))
+        path.curve(
+            to: point(20.625, 11.484),
+            controlPoint1: point(21.42, 10.84),
+            controlPoint2: point(21.42, 10.84)
+        )
+        path.line(to: point(14.501, 13.064))
+        path.curve(
+            to: point(13.063, 14.499),
+            controlPoint1: point(13.43, 13.34),
+            controlPoint2: point(13.43, 13.34)
+        )
+        path.line(to: point(11.484, 20.625))
+        path.curve(
+            to: point(10.537, 20.688),
+            controlPoint1: point(11.17, 21.42),
+            controlPoint2: point(11.17, 21.42)
+        )
         path.close()
 
         NSColor.black.setFill()

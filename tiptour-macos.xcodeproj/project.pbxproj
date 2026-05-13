@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		AA00BB032F6500030039DA55 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = AA00BB022F6500020039DA55 /* Sparkle */; };
 		AA00BB062F6500060039DA55 /* PostHog in Frameworks */ = {isa = PBXBuildFile; productRef = AA00BB052F6500050039DA55 /* PostHog */; };
+		AA00BB0B2F65000B0039DA55 /* CuaDriverCore in Frameworks */ = {isa = PBXBuildFile; productRef = AA00BB0A2F65000A0039DA55 /* CuaDriverCore */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -59,6 +60,7 @@
 			files = (
 				AA00BB032F6500030039DA55 /* Sparkle in Frameworks */,
 				AA00BB062F6500060039DA55 /* PostHog in Frameworks */,
+				AA00BB0B2F65000B0039DA55 /* CuaDriverCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -121,6 +123,7 @@
 			packageProductDependencies = (
 				AA00BB022F6500020039DA55 /* Sparkle */,
 				AA00BB052F6500050039DA55 /* PostHog */,
+				AA00BB0A2F65000A0039DA55 /* CuaDriverCore */,
 			);
 			productName = TipTour;
 			productReference = 28F22CBF2F56440300A0FC59 /* TipTour.app */;
@@ -207,6 +210,7 @@
 			packageReferences = (
 				AA00BB012F6500010039DA55 /* XCRemoteSwiftPackageReference "Sparkle" */,
 				AA00BB042F6500040039DA55 /* XCRemoteSwiftPackageReference "posthog-ios" */,
+				AA00BB092F6500090039DA55 /* XCRemoteSwiftPackageReference "cua" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 28F22CC02F56440300A0FC59 /* Products */;
@@ -624,6 +628,14 @@
 				minimumVersion = 3.0.0;
 			};
 		};
+		AA00BB092F6500090039DA55 /* XCRemoteSwiftPackageReference "cua" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/trycua/cua.git";
+			requirement = {
+				kind = revision;
+				revision = 041916daffebf04ef7ab873f3ebbecfddb913837;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -636,6 +648,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AA00BB042F6500040039DA55 /* XCRemoteSwiftPackageReference "posthog-ios" */;
 			productName = PostHog;
+		};
+		AA00BB0A2F65000A0039DA55 /* CuaDriverCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA00BB092F6500090039DA55 /* XCRemoteSwiftPackageReference "cua" */;
+			productName = CuaDriverCore;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

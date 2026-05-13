@@ -231,6 +231,7 @@ final class GeminiLiveSession: ObservableObject {
 
         isActive = true
         inputTranscript = ""
+        hasReceivedUserSpeechThisSession = false
 
         startPeriodicScreenshotUpdates()
 
@@ -242,6 +243,7 @@ final class GeminiLiveSession: ObservableObject {
         guard isActive else { return }
 
         stopPeriodicScreenshotUpdates()
+        hasReceivedUserSpeechThisSession = false
         stopMicCapture()
         // Player detach happened inside stopMicCapture; clear any
         // residual buffered audio so it doesn't replay on next session.
@@ -278,6 +280,12 @@ final class GeminiLiveSession: ObservableObject {
     /// re-emits the same tool call. The user reads/acts at human
     /// speed; we have to mute the visual stream to stop the loop.
     private(set) var areScreenshotsSuppressedUntilUserSpeaks: Bool = false
+
+    /// True after Gemini has transcribed at least one user speech chunk
+    /// in the current session. Startup screenshots and AX mark messages
+    /// are visual context, not user prompts; gating text-only mark sends
+    /// behind real speech prevents Gemini from speaking first on connect.
+    private var hasReceivedUserSpeechThisSession = false
 
     /// Pause mic capture and periodic screenshots while keeping the
     /// WebSocket and audio player alive. Use this while Gemini is
@@ -497,6 +505,10 @@ final class GeminiLiveSession: ObservableObject {
         }
         geminiClient.sendScreenshot(primaryCapture.imageData)
 
+        guard hasReceivedUserSpeechThisSession else {
+            return
+        }
+
         // Marks walk runs off-main at background priority so the CoreML
         // / Audio threads always take precedence — the AX walk is
         // cheap (<200ms worst case) but we don't want it contending
@@ -715,6 +727,7 @@ final class GeminiLiveSession: ObservableObject {
             // Gemini sends incremental transcripts — accumulate them so the
             // UI sees the full utterance as it builds up.
             inputTranscript += text
+            hasReceivedUserSpeechThisSession = true
             onInputTranscriptUpdate?(inputTranscript)
             // Any user speech clears the post-tool-call screenshot
             // suppression — the user is asking something new and

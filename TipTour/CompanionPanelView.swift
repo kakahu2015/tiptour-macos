@@ -25,7 +25,8 @@ struct CompanionPanelView: View {
                 .padding(.top, 16)
                 .padding(.horizontal, 16)
 
-            if let activePlan = workflowRunner.activePlan,
+            if companionManager.isMultiStepTourGuideEnabled,
+               let activePlan = workflowRunner.activePlan,
                !activePlan.steps.isEmpty {
                 Spacer().frame(height: 12)
                 planChecklistSection(plan: activePlan)
@@ -442,7 +443,7 @@ struct CompanionPanelView: View {
     /// ("do it for me"). When ON, the cursor flies to each resolved
     /// element and TipTour clicks it for the user; workflow plans
     /// drive themselves end-to-end (including keyboard shortcuts and
-    /// text typing). When OFF (default), TipTour only points and the
+    /// text typing). When OFF, TipTour only points and the
     /// user clicks themselves.
     ///
     /// We give this prominence in the panel — same row weight as Neko

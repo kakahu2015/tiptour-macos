@@ -73,6 +73,8 @@ final class WorkflowRunner: ObservableObject {
         /// The post-click AX-tree fingerprint didn't change — the click
         /// almost certainly missed its target.
         case postClickStateUnchanged(label: String)
+        /// Teaching mode reached a step that requires synthetic input.
+        case actionRequiresAutopilot(label: String)
 
         var humanReadable: String {
             switch self {
@@ -85,6 +87,8 @@ final class WorkflowRunner: ObservableObject {
                 return "dialog appeared"
             case .postClickStateUnchanged(let label):
                 return "click on \"\(label)\" didn't seem to register"
+            case .actionRequiresAutopilot(let label):
+                return "\"\(label)\" needs Autopilot"
             }
         }
     }
@@ -364,6 +368,13 @@ final class WorkflowRunner: ObservableObject {
         // app's repaint and false-pauses on autopilot clicks where
         // we know the click fired only milliseconds ago.
         if isPostClick,
+           shouldBypassPostClickValidator(plan: plan) {
+            preClickAccessibilityFingerprint = nil
+            continueAdvanceAfterValidator(plan: plan, isPostClick: true)
+            return
+        }
+
+        if isPostClick,
            let preFingerprint = preClickAccessibilityFingerprint,
            let stepLabel = activeStep?.label {
             let token = currentOperationToken
@@ -398,6 +409,33 @@ final class WorkflowRunner: ObservableObject {
         // pre-click snapshot.
         preClickAccessibilityFingerprint = nil
         continueAdvanceAfterValidator(plan: plan, isPostClick: isPostClick)
+    }
+
+    private func shouldBypassPostClickValidator(plan: WorkflowPlan) -> Bool {
+        guard let currentStep = activeStep else { return false }
+
+        // Context menus often do not mutate the target app's AX
+        // fingerprint because the menu is represented outside the
+        // app window. Let the next step resolve the menu item instead
+        // of pausing immediately.
+        if currentStep.type == .rightClick {
+            return true
+        }
+
+        let nextStepIndex = activeStepIndex + 1
+        guard plan.steps.indices.contains(nextStepIndex) else {
+            return false
+        }
+
+        switch plan.steps[nextStepIndex].type {
+        case .keyboardShortcut, .pressKey, .type, .setValue, .scroll:
+            // Clicking into text or a focused control can be a valid
+            // no-op at the AX-tree level. The following key/type action
+            // is the real mutation, so don't block the flow here.
+            return true
+        default:
+            return false
+        }
     }
 
     /// Bottom half of `advanceUsingCachedHandlers` — extracted so the
@@ -472,7 +510,7 @@ final class WorkflowRunner: ObservableObject {
         // to "point at" otherwise). In teaching mode we skip them so the
         // checklist UI keeps moving forward instead of stalling.
         switch step.type {
-        case .click:
+        case .click, .rightClick, .doubleClick:
             guard let label = step.label, !label.isEmpty else {
                 print("[Workflow] step \"\(step.hint)\" has no label — skipping")
                 advanceUsingCachedHandlers(isPostClick: false)
@@ -485,8 +523,26 @@ final class WorkflowRunner: ObservableObject {
                 operationToken: operationToken
             )
 
+        case .openApp:
+            await executeOpenApplicationStep(
+                step: step,
+                operationToken: operationToken
+            )
+
+        case .openURL:
+            await executeOpenURLStep(
+                step: step,
+                operationToken: operationToken
+            )
+
         case .keyboardShortcut:
             await executeKeyboardShortcutStep(
+                step: step,
+                operationToken: operationToken
+            )
+
+        case .pressKey:
+            await executePressKeyStep(
                 step: step,
                 operationToken: operationToken
             )
@@ -497,7 +553,19 @@ final class WorkflowRunner: ObservableObject {
                 operationToken: operationToken
             )
 
-        case .scroll, .waitForState, .observe:
+        case .setValue:
+            await executeSetValueStep(
+                step: step,
+                operationToken: operationToken
+            )
+
+        case .scroll:
+            await executeScrollStep(
+                step: step,
+                operationToken: operationToken
+            )
+
+        case .waitForState, .observe:
             // Not yet implemented — skip with a log so the checklist
             // doesn't silently stall on a step we can't drive.
             print("[Workflow] step \"\(step.hint)\" is .\(step.type.rawValue) — not yet implemented, skipping")
@@ -541,6 +609,7 @@ final class WorkflowRunner: ObservableObject {
                 armCursorAndClickDetector(
                     with: axResolution,
                     pickingFrom: latestAllCaptures,
+                    stepType: activeStep?.type ?? .click,
                     operationToken: operationToken
                 )
                 return
@@ -555,7 +624,7 @@ final class WorkflowRunner: ObservableObject {
             if let capture = pickedCapture,
                let resolution = await ElementResolver.shared.resolve(
                    label: label,
-                   llmHintInScreenshotPixels: activeStep?.hintCoordinate,
+                   llmHintInScreenshotPixels: activeStep?.hintCoordinate(in: capture),
                    latestCapture: capture,
                    targetAppHint: activePlan?.app,
                    proximityAnchorInGlobalScreen: previousStepResolvedGlobalScreenPoint
@@ -565,6 +634,7 @@ final class WorkflowRunner: ObservableObject {
                 armCursorAndClickDetector(
                     with: resolution,
                     pickingFrom: latestAllCaptures,
+                    stepType: activeStep?.type ?? .click,
                     operationToken: operationToken
                 )
                 return
@@ -591,6 +661,7 @@ final class WorkflowRunner: ObservableObject {
     private func armCursorAndClickDetector(
         with resolution: ElementResolver.Resolution,
         pickingFrom allScreenCaptures: [CompanionScreenCapture],
+        stepType: WorkflowStep.StepType,
         operationToken: UUID
     ) {
         // Prefer the capture whose display actually contains the resolved
@@ -617,24 +688,30 @@ final class WorkflowRunner: ObservableObject {
             targetAppHint: activePlan?.app
         )
 
-        // Arm the detector BEFORE handing the cursor the new resolution.
-        // The cursor flight takes ~500ms and a fast user can click the
-        // real element during that window; arming first closes the race.
-        ClickDetector.shared.arm(
-            targetPointInGlobalScreenCoordinates: resolution.globalScreenPoint,
-            targetRectInGlobalScreenCoordinates: resolution.globalScreenRect,
-            onTargetClicked: { [weak self] in
-                guard let self else { return }
-                // Token check shrugs off a stale arm whose plan was
-                // replaced before the user clicked.
-                guard operationToken == self.currentOperationToken else {
-                    print("[Workflow] click landed on stale armed target — ignored (token mismatch)")
-                    return
+        let isAutopilotEnabled = isAutopilotEnabledProvider?() ?? false
+        if isAutopilotEnabled {
+            ClickDetector.shared.disarm()
+        } else {
+            // Teaching mode: arm the detector BEFORE handing the cursor
+            // the new resolution. The cursor flight takes ~500ms and a
+            // fast user can click the real element during that window;
+            // arming first closes the race.
+            ClickDetector.shared.arm(
+                targetPointInGlobalScreenCoordinates: resolution.globalScreenPoint,
+                targetRectInGlobalScreenCoordinates: resolution.globalScreenRect,
+                onTargetClicked: { [weak self] in
+                    guard let self else { return }
+                    // Token check shrugs off a stale arm whose plan was
+                    // replaced before the user clicked.
+                    guard operationToken == self.currentOperationToken else {
+                        print("[Workflow] click landed on stale armed target — ignored (token mismatch)")
+                        return
+                    }
+                    print("[Workflow] target click detected — advancing to next step")
+                    self.advanceUsingCachedHandlers(isPostClick: true)
                 }
-                print("[Workflow] target click detected — advancing to next step")
-                self.advanceUsingCachedHandlers(isPostClick: true)
-            }
-        )
+            )
+        }
 
         // Fly the cursor. Handler is cached so subsequent steps keep it.
         if let pointHandler = pointHandlerForActivePlan {
@@ -646,6 +723,7 @@ final class WorkflowRunner: ObservableObject {
         // click from a stale plan can't hijack a newer one.
         scheduleAutopilotClickIfEnabled(
             resolution: resolution,
+            stepType: stepType,
             operationToken: operationToken
         )
     }
@@ -655,6 +733,7 @@ final class WorkflowRunner: ObservableObject {
     /// and the user clicks themselves.
     private func scheduleAutopilotClickIfEnabled(
         resolution: ElementResolver.Resolution,
+        stepType: WorkflowStep.StepType,
         operationToken: UUID
     ) {
         let isEnabled = isAutopilotEnabledProvider?() ?? false
@@ -678,10 +757,26 @@ final class WorkflowRunner: ObservableObject {
                 return AccessibilityTreeResolver().runningAppMatching(hint: hint)
             }()
             do {
-                try await ActionExecutor.shared.click(
-                    atGlobalScreenPoint: resolution.globalScreenPoint,
-                    activatingTargetApp: targetApp
-                )
+                switch stepType {
+                case .rightClick:
+                    try await ActionExecutor.shared.rightClick(
+                        atGlobalScreenPoint: resolution.globalScreenPoint,
+                        activatingTargetApp: targetApp
+                    )
+                case .doubleClick:
+                    try await ActionExecutor.shared.doubleClick(
+                        atGlobalScreenPoint: resolution.globalScreenPoint,
+                        activatingTargetApp: targetApp
+                    )
+                default:
+                    try await ActionExecutor.shared.click(
+                        atGlobalScreenPoint: resolution.globalScreenPoint,
+                        activatingTargetApp: targetApp
+                    )
+                }
+                guard operationToken == self.currentOperationToken else { return }
+                guard self.activePlan != nil, self.pausedReason == nil else { return }
+                self.advanceUsingCachedHandlers(isPostClick: true)
             } catch {
                 print("[Workflow] autopilot click failed: \(error.localizedDescription)")
             }
@@ -689,6 +784,58 @@ final class WorkflowRunner: ObservableObject {
     }
 
     // MARK: - Non-Click Step Executors (Autopilot Only)
+
+    private func executeOpenApplicationStep(
+        step: WorkflowStep,
+        operationToken: UUID
+    ) async {
+        guard isAutopilotEnabledProvider?() == true else {
+            pause(.actionRequiresAutopilot(label: step.label ?? step.hint))
+            return
+        }
+        let applicationName = step.label ?? activePlan?.app
+        guard let applicationName, !applicationName.isEmpty else {
+            print("[Workflow] openApp step has no application name — skipping")
+            advanceUsingCachedHandlers(isPostClick: false)
+            return
+        }
+
+        do {
+            try await ActionExecutor.shared.openApplication(named: applicationName)
+            guard operationToken == currentOperationToken else { return }
+            advanceUsingCachedHandlers(isPostClick: true)
+        } catch {
+            print("[Workflow] open app \"\(applicationName)\" failed: \(error.localizedDescription)")
+            currentStepResolutionFailureLabel = applicationName
+        }
+    }
+
+    private func executeOpenURLStep(
+        step: WorkflowStep,
+        operationToken: UUID
+    ) async {
+        guard isAutopilotEnabledProvider?() == true else {
+            pause(.actionRequiresAutopilot(label: step.label ?? step.hint))
+            return
+        }
+        guard let rawURLString = step.label, !rawURLString.isEmpty else {
+            print("[Workflow] openURL step has no URL — skipping")
+            advanceUsingCachedHandlers(isPostClick: false)
+            return
+        }
+
+        do {
+            try await ActionExecutor.shared.openURL(
+                rawURLString,
+                preferredApplicationName: activePlan?.app
+            )
+            guard operationToken == currentOperationToken else { return }
+            advanceUsingCachedHandlers(isPostClick: true)
+        } catch {
+            print("[Workflow] open URL \"\(rawURLString)\" failed: \(error.localizedDescription)")
+            currentStepResolutionFailureLabel = rawURLString
+        }
+    }
 
     /// Execute a `.keyboardShortcut` step. The step's `label` is
     /// expected to be the shortcut string (e.g. "Cmd+S"). In teaching
@@ -699,8 +846,7 @@ final class WorkflowRunner: ObservableObject {
         operationToken: UUID
     ) async {
         guard isAutopilotEnabledProvider?() == true else {
-            print("[Workflow] step \"\(step.hint)\" is .keyboardShortcut — needs Autopilot, skipping in teaching mode")
-            advanceUsingCachedHandlers(isPostClick: false)
+            pause(.actionRequiresAutopilot(label: step.label ?? step.hint))
             return
         }
         guard let shortcut = step.label, !shortcut.isEmpty else {
@@ -732,6 +878,34 @@ final class WorkflowRunner: ObservableObject {
         }
     }
 
+    private func executePressKeyStep(
+        step: WorkflowStep,
+        operationToken: UUID
+    ) async {
+        guard isAutopilotEnabledProvider?() == true else {
+            pause(.actionRequiresAutopilot(label: step.label ?? step.hint))
+            return
+        }
+        guard let keyName = step.label, !keyName.isEmpty else {
+            print("[Workflow] pressKey step has no key — skipping")
+            advanceUsingCachedHandlers(isPostClick: false)
+            return
+        }
+
+        let targetApp = targetAppForActivePlan()
+        do {
+            try await ActionExecutor.shared.pressKey(
+                keyName,
+                activatingTargetApp: targetApp
+            )
+            guard operationToken == currentOperationToken else { return }
+            advanceUsingCachedHandlers(isPostClick: true)
+        } catch {
+            print("[Workflow] press key \"\(keyName)\" failed: \(error.localizedDescription)")
+            currentStepResolutionFailureLabel = keyName
+        }
+    }
+
     /// Execute a `.type` step — types the step's `label` text into the
     /// currently focused field. Only runs in Autopilot mode for the
     /// same reason as keyboard shortcuts: there's nothing to point at.
@@ -740,8 +914,7 @@ final class WorkflowRunner: ObservableObject {
         operationToken: UUID
     ) async {
         guard isAutopilotEnabledProvider?() == true else {
-            print("[Workflow] step \"\(step.hint)\" is .type — needs Autopilot, skipping in teaching mode")
-            advanceUsingCachedHandlers(isPostClick: false)
+            pause(.actionRequiresAutopilot(label: step.label ?? step.hint))
             return
         }
         guard let textToType = step.label, !textToType.isEmpty else {
@@ -768,6 +941,68 @@ final class WorkflowRunner: ObservableObject {
             print("[Workflow] type \"\(textToType.prefix(40))…\" failed: \(error.localizedDescription)")
             currentStepResolutionFailureLabel = "type"
         }
+    }
+
+    private func executeSetValueStep(
+        step: WorkflowStep,
+        operationToken: UUID
+    ) async {
+        guard isAutopilotEnabledProvider?() == true else {
+            pause(.actionRequiresAutopilot(label: step.value ?? step.label ?? step.hint))
+            return
+        }
+        let valueToSet = step.value ?? step.label
+        guard let valueToSet, !valueToSet.isEmpty else {
+            print("[Workflow] setValue step has no value — skipping")
+            advanceUsingCachedHandlers(isPostClick: false)
+            return
+        }
+
+        let targetApp = targetAppForActivePlan()
+        do {
+            try await ActionExecutor.shared.setFocusedValue(
+                valueToSet,
+                activatingTargetApp: targetApp
+            )
+            guard operationToken == currentOperationToken else { return }
+            advanceUsingCachedHandlers(isPostClick: true)
+        } catch {
+            print("[Workflow] set value failed: \(error.localizedDescription)")
+            currentStepResolutionFailureLabel = valueToSet
+        }
+    }
+
+    private func executeScrollStep(
+        step: WorkflowStep,
+        operationToken: UUID
+    ) async {
+        guard isAutopilotEnabledProvider?() == true else {
+            pause(.actionRequiresAutopilot(label: step.hint))
+            return
+        }
+        let direction = step.direction ?? step.label ?? "down"
+        let amount = step.amount ?? 3
+        let granularity = step.by ?? "line"
+
+        let targetApp = targetAppForActivePlan()
+        do {
+            try await ActionExecutor.shared.scroll(
+                direction: direction,
+                amount: amount,
+                by: granularity,
+                activatingTargetApp: targetApp
+            )
+            guard operationToken == currentOperationToken else { return }
+            advanceUsingCachedHandlers(isPostClick: true)
+        } catch {
+            print("[Workflow] scroll \(direction) failed: \(error.localizedDescription)")
+            currentStepResolutionFailureLabel = direction
+        }
+    }
+
+    private func targetAppForActivePlan() -> NSRunningApplication? {
+        guard let hint = activePlan?.app else { return nil }
+        return AccessibilityTreeResolver().runningAppMatching(hint: hint)
     }
 
     // MARK: - App-Switch Pause

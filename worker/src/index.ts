@@ -2,8 +2,8 @@
  * TipTour Proxy Worker
  *
  * Thin Cloudflare Worker that brokers credentials for the Gemini Live
- * voice backend and provides a multilingual label matcher. The Gemini
- * key is stored as a Cloudflare secret — the app never bakes it in.
+ * voice backend and provides a multilingual label matcher. Secrets are
+ * stored as Cloudflare secrets — the app never bakes them in.
  *
  * Routes:
  *   GET  /gemini-live-key       → returns the Gemini API key so the app

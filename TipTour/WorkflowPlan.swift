@@ -33,6 +33,11 @@ struct WorkflowStep: Codable, Identifiable, Hashable {
     /// Human-readable label for the element, e.g. "File", "New",
     /// "General template". Passed to ElementResolver for pixel lookup.
     let label: String?
+    let value: String?
+    let direction: String?
+    let amount: Int?
+    let by: String?
+    let targetContext: TargetContext?
 
     /// Short sentence describing what the user should do at this step.
     /// Used for the on-screen step list UI (e.g. "Click the File menu").
@@ -43,6 +48,10 @@ struct WorkflowStep: Codable, Identifiable, Hashable {
     /// fallback when the AX tree has no match for the label.
     let hintX: Int?
     let hintY: Int?
+    /// Original Gemini box_2d in normalized [y1, x1, y2, x2] space.
+    /// Keeping this lets us scale against the exact screenshot capture
+    /// used for a resolution attempt instead of reusing stale pixels.
+    let box2DNormalized: [Int]?
 
     /// Which screen the action happens on (for multi-monitor). nil =
     /// use the cursor's current screen.
@@ -50,11 +59,73 @@ struct WorkflowStep: Codable, Identifiable, Hashable {
 
     enum StepType: String, Codable, Hashable {
         case click            // point at and click an element
+        case rightClick       // point at and right-click an element
+        case doubleClick      // point at and double-click an element
+        case openApp          // launch or foreground an application
+        case openURL          // open a URL or file/folder URL
         case keyboardShortcut // press a specific key combo (e.g. "Cmd+N")
+        case pressKey         // press one key (e.g. Return, Escape, PageDown)
         case type             // type text into a focused field
+        case setValue         // set AXValue on the focused element
         case scroll           // scroll in a specific direction
         case waitForState     // pause until a condition is visually satisfied
         case observe          // nothing to do — just highlight for the user
+
+        static func normalized(from rawTypeName: String?) -> StepType {
+            let compactTypeName = (rawTypeName ?? "click")
+                .lowercased()
+                .filter { $0.isLetter || $0.isNumber }
+
+            switch compactTypeName {
+            case "openapp", "launchapp", "launchapplication", "openapplication":
+                return .openApp
+            case "openurl", "url", "openlink", "openwebsite", "openfile", "openfolder":
+                return .openURL
+            case "rightclick", "secondaryclick", "contextclick":
+                return .rightClick
+            case "doubleclick":
+                return .doubleClick
+            case "keyboardshortcut", "hotkey", "shortcut":
+                return .keyboardShortcut
+            case "presskey", "key":
+                return .pressKey
+            case "typetext", "inputtext", "entertext":
+                return .type
+            case "setvalue", "set":
+                return .setValue
+            case "waitforstate", "wait":
+                return .waitForState
+            default:
+                return StepType(rawValue: compactTypeName) ?? .click
+            }
+        }
+    }
+
+    enum TargetContext: String, Codable, Hashable {
+        case visibleElement
+        case currentHighlight
+        case currentSelection
+        case focusedElement
+
+        static func normalized(from rawTargetContext: String?) -> TargetContext? {
+            guard let rawTargetContext else { return nil }
+            let compactTargetContext = rawTargetContext
+                .lowercased()
+                .filter { $0.isLetter || $0.isNumber }
+
+            switch compactTargetContext {
+            case "highlight", "currenthighlight", "focusedhighlight", "paintedhighlight":
+                return .currentHighlight
+            case "selection", "currentselection", "selectedtext", "textselection":
+                return .currentSelection
+            case "focus", "focused", "focusedelement", "activefield":
+                return .focusedElement
+            case "visible", "visibleelement", "screen", "onscreen":
+                return .visibleElement
+            default:
+                return nil
+            }
+        }
     }
 
     /// Convenience — the LLM's coordinate hint as a CGPoint if both
@@ -62,6 +133,24 @@ struct WorkflowStep: Codable, Identifiable, Hashable {
     var hintCoordinate: CGPoint? {
         guard let hintX, let hintY else { return nil }
         return CGPoint(x: hintX, y: hintY)
+    }
+
+    func hintCoordinate(in capture: CompanionScreenCapture?) -> CGPoint? {
+        guard let box = box2DNormalized, box.count == 4, let capture else {
+            return hintCoordinate
+        }
+
+        let y1Norm = CGFloat(box[0])
+        let x1Norm = CGFloat(box[1])
+        let y2Norm = CGFloat(box[2])
+        let x2Norm = CGFloat(box[3])
+
+        let centerNormX = (x1Norm + x2Norm) / 2
+        let centerNormY = (y1Norm + y2Norm) / 2
+
+        let pixelX = centerNormX * CGFloat(capture.screenshotWidthInPixels) / 1000
+        let pixelY = centerNormY * CGFloat(capture.screenshotHeightInPixels) / 1000
+        return CGPoint(x: pixelX, y: pixelY)
     }
 }
 
@@ -156,6 +245,12 @@ private struct FlexiblePlanPayload: Codable {
         let y: Int?
         let screenNumber: Int?
         let screen: Int?
+        let value: String?
+        let direction: String?
+        let amount: Int?
+        let by: String?
+        let targetContext: String?
+        let target_context: String?
     }
 
     func toPlan() -> WorkflowPlan? {
@@ -163,15 +258,21 @@ private struct FlexiblePlanPayload: Codable {
         guard !rawSteps.isEmpty else { return nil }
 
         let normalizedSteps: [WorkflowStep] = rawSteps.enumerated().map { index, s in
-            let typeString = (s.type ?? s.action ?? "click").lowercased()
-            let stepType = WorkflowStep.StepType(rawValue: typeString) ?? .click
             return WorkflowStep(
                 id: s.id ?? "step_\(index + 1)",
-                type: stepType,
+                type: WorkflowStep.StepType.normalized(from: s.type ?? s.action),
                 label: s.label ?? s.target ?? s.element,
+                value: s.value,
+                direction: s.direction,
+                amount: s.amount,
+                by: s.by,
+                targetContext: WorkflowStep.TargetContext.normalized(
+                    from: s.targetContext ?? s.target_context
+                ),
                 hint: s.hint ?? s.description ?? "",
                 hintX: s.x,
                 hintY: s.y,
+                box2DNormalized: nil,
                 screenNumber: s.screenNumber ?? s.screen
             )
         }

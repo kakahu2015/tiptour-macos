@@ -10,6 +10,7 @@
 import ApplicationServices
 import AVFoundation
 import Combine
+import CuaDriverCore
 import Foundation
 import PostHog
 import ScreenCaptureKit
@@ -45,21 +46,33 @@ final class CompanionManager: ObservableObject {
     /// Whether the blue cursor overlay is currently visible on screen.
     @Published private(set) var isOverlayVisible: Bool = false
 
+    /// Freeform attention brush. Hold control + shift and move the mouse
+    /// to paint the area the user means by "this area" / "this line".
+    @Published private(set) var isFocusHighlightActive: Bool = false
+    @Published private(set) var focusHighlightGlobalPoints: [CGPoint] = []
+    @Published private(set) var lastFocusHighlightContext: FocusHighlightContext?
+    private var currentFocusHighlightWindowContext: FocusHighlightWindowContext?
+    private var lastHoverWindowContext: FocusHighlightWindowContext?
+    private var lastHoverWindowContextDate: Date?
+    private var lastHoverTextSelectionContext: FocusHighlightTextSelectionContext?
+
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
+    let globalHighlightShortcutMonitor = GlobalHighlightShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
 
     /// Base URL for the Cloudflare Worker proxy. All API requests route
     /// through this so keys never ship in the app binary.
     private static let workerBaseURL: String = {
         let url = "https://clicky-proxy.milindsoni201.workers.dev"
-        // ElementResolver's multilingual /match-label fallback hits the
-        // same worker. Setting the override here means we have one
-        // source of truth for the base URL.
+        // ElementResolver's multilingual /match-label fallback hits
+        // the same worker. Setting the override here keeps one source
+        // of truth for the base URL.
         ElementResolver.workerBaseURLOverride = url
         return url
     }()
 
     private var shortcutTransitionCancellable: AnyCancellable?
+    private var highlightTransitionCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     private var voiceAudioPowerCancellable: AnyCancellable?
     private var voiceModelSpeakingCancellable: AnyCancellable?
@@ -103,15 +116,20 @@ final class CompanionManager: ObservableObject {
         }
         backend.onInputTranscriptUpdate = { [weak self] fullInputTranscript in
             guard let self else { return }
+            self.lastTranscript = fullInputTranscript
             let isNewUtterance = fullInputTranscript.trimmingCharacters(in: .whitespacesAndNewlines).count > 0
                 && self.previousInputTranscriptLength == 0
             if isNewUtterance {
                 self.handledToolCallIDsThisUtterance.removeAll()
+                if !self.sendLatestFocusHighlightContextToGeminiIfPossible() {
+                    self.sendLatestHoverWindowContextToGeminiIfPossible()
+                }
             }
             self.previousInputTranscriptLength = fullInputTranscript.count
         }
         backend.onTurnComplete = { [weak self] in
             self?.previousInputTranscriptLength = 0
+            self?.lastTranscript = nil
         }
         backend.onError = { error in
             print("[VoiceBackend] Error: \(error.localizedDescription)")
@@ -209,7 +227,8 @@ final class CompanionManager: ObservableObject {
         let resolution = await ElementResolver.shared.resolve(
             label: label,
             llmHintInScreenshotPixels: hintInScreenshotPixels,
-            latestCapture: capture
+            latestCapture: capture,
+            targetAppHint: AccessibilityTreeResolver.userTargetAppOverride?.localizedName
         )
         let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
         guard let resolution else {
@@ -298,6 +317,7 @@ final class CompanionManager: ObservableObject {
         let parsedSteps: [WorkflowStep] = steps.enumerated().map { index, raw in
             let label = raw["label"] as? String
             let hint = raw["hint"] as? String ?? ""
+            let type = WorkflowStep.StepType.normalized(from: raw["type"] as? String)
 
             // Convert Gemini's box_2d ([y1, x1, y2, x2] in [0, 1000]) to
             // the box's center in screenshot-pixel space. The resolver's
@@ -312,11 +332,19 @@ final class CompanionManager: ObservableObject {
 
             return WorkflowStep(
                 id: "step_\(index + 1)",
-                type: .click,
+                type: type,
                 label: label,
+                value: raw["value"] as? String,
+                direction: raw["direction"] as? String,
+                amount: raw["amount"] as? Int,
+                by: raw["by"] as? String,
+                targetContext: WorkflowStep.TargetContext.normalized(
+                    from: (raw["targetContext"] as? String) ?? (raw["target_context"] as? String)
+                ),
                 hint: hint,
                 hintX: hintX,
                 hintY: hintY,
+                box2DNormalized: box2DNormalized,
                 screenNumber: nil
             )
         }
@@ -324,6 +352,16 @@ final class CompanionManager: ObservableObject {
         guard !parsedSteps.isEmpty else {
             print("[Tool] ✗ submit_workflow_plan — zero steps")
             return ["ok": false, "reason": "empty_steps"]
+        }
+
+        guard isAutopilotEnabled || isMultiStepTourGuideEnabled else {
+            print("[Tool] ✗ submit_workflow_plan — tour guide disabled and Autopilot off")
+            voiceBackend.invalidateScreenshotHashCache()
+            return [
+                "ok": false,
+                "reason": "tour_guide_disabled",
+                "message": "The step-by-step teaching tour guide is disabled. If the user wants action-taking, ask them to turn Autopilot on; otherwise answer conversationally without submitting a workflow plan."
+            ]
         }
 
         let plan = WorkflowPlan(
@@ -337,16 +375,19 @@ final class CompanionManager: ObservableObject {
 
         voiceBackend.suppressScreenshotsUntilUserSpeaks()
 
-        // Pause mic + screenshots so Gemini can narrate the plan in one
-        // uninterrupted turn. Once narration finishes, exit narration mode
-        // — mic/screenshots resume but the WebSocket stays open.
-        print("[Workflow] entering Gemini narration mode — mic/screenshots paused, socket kept alive for narration")
-        voiceBackend.enterNarrationMode()
-        scheduleExitNarrationModeAfterSpeechEnds()
+        if isMultiStepTourGuideEnabled {
+            // Pause mic + screenshots so Gemini can narrate the plan in one
+            // uninterrupted turn. Once narration finishes, exit narration mode
+            // — mic/screenshots resume but the WebSocket stays open.
+            print("[Workflow] entering Gemini narration mode — mic/screenshots paused, socket kept alive for narration")
+            voiceBackend.enterNarrationMode()
+            scheduleExitNarrationModeAfterSpeechEnds()
+        }
 
         return [
             "ok": true,
-            "accepted_steps": stepLabels.count
+            "accepted_steps": stepLabels.count,
+            "tour_guide_enabled": isMultiStepTourGuideEnabled
         ]
     }
 
@@ -433,10 +474,10 @@ final class CompanionManager: ObservableObject {
     }
 
     /// Neko mode: replace the blue triangle cursor with a pixel-art cat
-    /// (classic oneko sprites). Defaults ON for new installs since the cat
-    /// is part of TipTour's identity.
+    /// (classic oneko sprites). Defaults OFF so the standard cursor
+    /// remains the primary action-taking visual on new installs.
     @Published var isNekoModeEnabled: Bool = UserDefaults.standard.object(forKey: "isNekoModeEnabled") == nil
-        ? true
+        ? false
         : UserDefaults.standard.bool(forKey: "isNekoModeEnabled")
 
     func setNekoModeEnabled(_ enabled: Bool) {
@@ -449,21 +490,35 @@ final class CompanionManager: ObservableObject {
     /// `point_at_element` calls click immediately after the cursor
     /// flight finishes; workflow plans drive themselves end-to-end.
     ///
-    /// Defaults OFF — teaching mode (point only, user clicks) is
-    /// TipTour's safe default identity. Persisted per-user so power
-    /// users don't have to flip it every launch, but the menu bar
-    /// panel exposes it prominently so it's never hidden.
+    /// Defaults ON so TipTour can take actions by default. Persisted
+    /// per-user so people can still switch back to teaching mode and
+    /// keep that preference.
     ///
     /// Safety net: `WorkflowRunner` already pauses when the user
     /// Cmd-Tabs to an unrelated app, when a modal dialog appears, and
     /// when the post-click AX fingerprint didn't change. Pressing the
     /// hotkey closes the Gemini Live session and stops anything in
     /// flight. Autopilot rides those rails — it doesn't bypass them.
-    @Published var isAutopilotEnabled: Bool = UserDefaults.standard.bool(forKey: "isAutopilotEnabled")
+    @Published var isAutopilotEnabled: Bool = UserDefaults.standard.object(forKey: "isAutopilotEnabled") == nil
+        ? true
+        : UserDefaults.standard.bool(forKey: "isAutopilotEnabled")
 
     func setAutopilotEnabled(_ enabled: Bool) {
         isAutopilotEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: "isAutopilotEnabled")
+    }
+
+    /// Feature flag for the older teaching/tour-guide experience:
+    /// visible checklist, step-by-step user-click guidance, and plan
+    /// narration mode. Defaults OFF while action-taking is the primary
+    /// path.
+    @Published var isMultiStepTourGuideEnabled: Bool = UserDefaults.standard.object(forKey: "isMultiStepTourGuideEnabled") == nil
+        ? false
+        : UserDefaults.standard.bool(forKey: "isMultiStepTourGuideEnabled")
+
+    func setMultiStepTourGuideEnabled(_ enabled: Bool) {
+        isMultiStepTourGuideEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isMultiStepTourGuideEnabled")
     }
 
     /// Debug flag for the workflow checklist: when true, ClickDetector
@@ -560,6 +615,7 @@ final class CompanionManager: ObservableObject {
         // presses the hotkey.
         _ = voiceBackend
         bindShortcutTransitions()
+        bindHighlightTransitions()
         beginTrackingUserTargetApp()
         ClickDetector.advanceOnAnyClickEnabled = advanceOnAnyClickEnabled
 
@@ -584,8 +640,10 @@ final class CompanionManager: ObservableObject {
 
     func stop() {
         globalPushToTalkShortcutMonitor.stop()
+        globalHighlightShortcutMonitor.stop()
         overlayWindowManager.hideOverlay()
         shortcutTransitionCancellable?.cancel()
+        highlightTransitionCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
         voiceAudioPowerCancellable?.cancel()
@@ -611,8 +669,10 @@ final class CompanionManager: ObservableObject {
 
         if currentlyHasAccessibility {
             globalPushToTalkShortcutMonitor.start()
+            globalHighlightShortcutMonitor.start()
         } else {
             globalPushToTalkShortcutMonitor.stop()
+            globalHighlightShortcutMonitor.stop()
         }
 
         hasScreenRecordingPermission = WindowPositionManager.hasScreenRecordingPermission()
@@ -703,6 +763,15 @@ final class CompanionManager: ObservableObject {
             }
     }
 
+    private func bindHighlightTransitions() {
+        highlightTransitionCancellable = globalHighlightShortcutMonitor
+            .highlightTransitionPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] transition in
+                self?.handleHighlightTransition(transition)
+            }
+    }
+
     /// Watch NSWorkspace for app-activation events and continuously remember
     /// the last NON-TipTour app the user activated. This is the
     /// `userTargetAppOverride` the AX resolver uses to route queries at
@@ -777,7 +846,14 @@ final class CompanionManager: ObservableObject {
             // menu bar panel or cursor overlay. Once TipTour shows any UI
             // macOS may flip frontmost to us, so this is the only reliable
             // moment to capture which app the user was actually looking at.
-            if let frontmost = NSWorkspace.shared.frontmostApplication,
+            let hoverWindowContext = Self.windowContext(at: NSEvent.mouseLocation)
+            if let hoverWindowContext {
+                lastHoverWindowContext = hoverWindowContext
+                lastHoverWindowContextDate = Date()
+                lastHoverTextSelectionContext = Self.textSelectionContext(for: hoverWindowContext)
+                updateTargetAppOverride(for: hoverWindowContext)
+                print("[Target] user's app under mouse at hotkey press: \(hoverWindowContext.bundleIdentifier ?? "?") (\(hoverWindowContext.appName))")
+            } else if let frontmost = NSWorkspace.shared.frontmostApplication,
                frontmost.bundleIdentifier != Bundle.main.bundleIdentifier {
                 AccessibilityTreeResolver.userTargetAppOverride = frontmost
                 print("[Target] user's app at hotkey press: \(frontmost.bundleIdentifier ?? "?") (\(frontmost.localizedName ?? "?"))")
@@ -785,6 +861,7 @@ final class CompanionManager: ObservableObject {
 
             NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
             clearDetectedElementLocation()
+            WorkflowRunner.shared.stop()
 
             showOnboardingPrompt = false
             onboardingPromptText = ""
@@ -810,6 +887,579 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    private func handleHighlightTransition(_ transition: GlobalHighlightShortcutMonitor.HighlightTransition) {
+        switch transition {
+        case .began(let globalPoint):
+            beginFocusHighlight(at: globalPoint)
+        case .moved(let globalPoint):
+            appendFocusHighlightPoint(globalPoint)
+        case .ended:
+            commitFocusHighlight()
+        }
+    }
+
+    private func beginFocusHighlight(at globalPoint: CGPoint) {
+        isFocusHighlightActive = true
+        focusHighlightGlobalPoints = [globalPoint]
+        currentFocusHighlightWindowContext = Self.windowContext(at: globalPoint)
+        updateTargetAppOverrideForFocusHighlightWindow()
+        lastFocusHighlightContext = nil
+
+        if hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible {
+            overlayWindowManager.hasShownOverlayBefore = true
+            overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+            isOverlayVisible = true
+        }
+    }
+
+    private func appendFocusHighlightPoint(_ globalPoint: CGPoint) {
+        guard isFocusHighlightActive else { return }
+
+        if let lastPoint = focusHighlightGlobalPoints.last {
+            let distance = hypot(globalPoint.x - lastPoint.x, globalPoint.y - lastPoint.y)
+            guard distance >= 3 else { return }
+        }
+
+        focusHighlightGlobalPoints.append(globalPoint)
+        currentFocusHighlightWindowContext = Self.windowContext(at: globalPoint)
+            ?? currentFocusHighlightWindowContext
+        updateTargetAppOverrideForFocusHighlightWindow()
+    }
+
+    private func commitFocusHighlight() {
+        guard isFocusHighlightActive else { return }
+        isFocusHighlightActive = false
+
+        let highlightedBoundingRect = Self.boundingRect(for: focusHighlightGlobalPoints)
+        let highlightedWindowContext = Self.windowContext(
+            intersecting: highlightedBoundingRect,
+            paintedPoints: focusHighlightGlobalPoints
+        ) ?? currentFocusHighlightWindowContext
+        currentFocusHighlightWindowContext = highlightedWindowContext
+        updateTargetAppOverrideForFocusHighlightWindow()
+
+        guard let context = FocusHighlightContext(
+            points: focusHighlightGlobalPoints,
+            hoveredWindow: highlightedWindowContext,
+            intersectedElement: Self.elementContext(
+                in: highlightedWindowContext,
+                intersecting: highlightedBoundingRect,
+                paintedPoints: focusHighlightGlobalPoints
+            ),
+            textSelection: Self.textSelectionContext(
+                for: highlightedWindowContext,
+                intersecting: highlightedBoundingRect,
+                paintedPoints: focusHighlightGlobalPoints
+            )
+        ) else {
+            focusHighlightGlobalPoints = []
+            lastFocusHighlightContext = nil
+            currentFocusHighlightWindowContext = nil
+            return
+        }
+
+        lastFocusHighlightContext = context
+        if let highlightedWindowContext = context.hoveredWindow {
+            let elementRole = context.intersectedElement?.role ?? "none"
+            print("[FocusHighlight] committed in app=\(highlightedWindowContext.appName) pid=\(highlightedWindowContext.processIdentifier) window_id=\(highlightedWindowContext.windowID.map(String.init) ?? "?") element=\(elementRole)")
+        }
+        focusHighlightGlobalPoints = []
+        currentFocusHighlightWindowContext = nil
+        sendLatestFocusHighlightContextToGeminiIfPossible()
+    }
+
+    private func updateTargetAppOverrideForFocusHighlightWindow() {
+        updateTargetAppOverride(for: currentFocusHighlightWindowContext)
+    }
+
+    private func updateTargetAppOverride(for windowContext: FocusHighlightWindowContext?) {
+        guard let processIdentifier = windowContext?.processIdentifier,
+              let runningApplication = NSRunningApplication(processIdentifier: processIdentifier),
+              runningApplication.bundleIdentifier != Bundle.main.bundleIdentifier else {
+            return
+        }
+        AccessibilityTreeResolver.userTargetAppOverride = runningApplication
+        Self.enableManualAccessibilityIfNeeded(for: runningApplication)
+    }
+
+    @discardableResult
+    private func sendLatestFocusHighlightContextToGeminiIfPossible() -> Bool {
+        guard voiceBackend.isActive,
+              let context = lastFocusHighlightContext else {
+            return false
+        }
+
+        voiceBackend.sendText(focusHighlightContextPrompt(context))
+        voiceBackend.invalidateScreenshotHashCache()
+        return true
+    }
+
+    private func sendLatestHoverWindowContextToGeminiIfPossible() {
+        guard voiceBackend.isActive,
+              let hoverWindowContext = lastHoverWindowContext else {
+            return
+        }
+
+        voiceBackend.sendText(hoverWindowContextPrompt(hoverWindowContext))
+        voiceBackend.invalidateScreenshotHashCache()
+    }
+
+    private func focusHighlightContextPrompt(_ context: FocusHighlightContext) -> String {
+        let rect = context.globalAppKitBoundingRect
+        var lines = [
+            "user focus highlight context:",
+            "the user just painted a freeform highlight region. treat phrases like \"this\", \"this area\", \"this line\", \"that text\", \"rewrite this\", or \"change this\" as referring to this highlighted region.",
+            "global appkit rect: x=\(Int(rect.minX)), y=\(Int(rect.minY)), width=\(Int(rect.width)), height=\(Int(rect.height))."
+        ]
+
+        if let lastPaintedPoint = context.globalAppKitPoints.last {
+            lines.append("current hover / last painted point: x=\(Int(lastPaintedPoint.x)), y=\(Int(lastPaintedPoint.y)).")
+        }
+
+        if let hoveredWindow = context.hoveredWindow {
+            lines.append("hovered app/window target: app=\"\(hoveredWindow.appName)\", bundle_id=\"\(hoveredWindow.bundleIdentifier ?? "unknown")\", pid=\(hoveredWindow.processIdentifier), window_title=\"\(hoveredWindow.windowTitle ?? "")\", window_rect x=\(Int(hoveredWindow.globalAppKitFrame.minX)), y=\(Int(hoveredWindow.globalAppKitFrame.minY)), width=\(Int(hoveredWindow.globalAppKitFrame.width)), height=\(Int(hoveredWindow.globalAppKitFrame.height)).")
+            lines.append("for this request, keep actions inside that hovered app/window unless the user explicitly asks to switch apps.")
+        }
+
+        if let textSelection = context.textSelection {
+            lines.append("highlight-resolved text target: selected_text=\"\(Self.promptEscapedText(textSelection.selectedText, maxLength: 900))\", source=\"\(textSelection.source)\", focused_role=\"\(textSelection.focusedElementRole ?? "unknown")\", selected_range_location=\(textSelection.selectedTextRangeLocation.map(String.init) ?? "unknown"), selected_range_length=\(textSelection.selectedTextRangeLength.map(String.init) ?? "unknown").")
+            lines.append("critical highlighted-text rule: if the user asks to replace, rewrite, delete, format, or otherwise edit this highlighted text, preserve this exact range. do not click the selected words first because that can collapse or move the insertion point. use a direct type, pressKey, keyboardShortcut, setValue, or app menu action against the already-focused selection. for a one-word change, type only the replacement word, not the surrounding paragraph.")
+        }
+
+        if let intersectedElement = context.intersectedElement {
+            var elementLine = "highlight-intersected accessibility element: role=\"\(intersectedElement.role ?? "unknown")\""
+            if let title = intersectedElement.title, !title.isEmpty {
+                elementLine += ", title=\"\(Self.promptEscapedText(title, maxLength: 180))\""
+            }
+            if let value = intersectedElement.value, !value.isEmpty {
+                elementLine += ", element_value_context=\"\(Self.promptEscapedText(value, maxLength: 500))\""
+            }
+            if let description = intersectedElement.description, !description.isEmpty {
+                elementLine += ", description=\"\(Self.promptEscapedText(description, maxLength: 180))\""
+            }
+            if let frame = intersectedElement.globalAppKitFrame {
+                elementLine += ", element_rect x=\(Int(frame.minX)), y=\(Int(frame.minY)), width=\(Int(frame.width)), height=\(Int(frame.height))"
+            }
+            lines.append(elementLine + ".")
+            lines.append("prefer this intersected element over any stale focused element when deciding what text area or control the highlight refers to. element_value_context may be the whole text field or note, so never type it back as the replacement unless the user explicitly asks to replace the whole field.")
+        }
+
+        if let capture = voiceBackend.latestCapture,
+           let screenshotRectDescription = screenshotRectDescription(for: context, capture: capture) {
+            lines.append(screenshotRectDescription)
+        }
+
+        lines.append("when editing, prefer the accessibility element or text field intersecting this region; if needed, click inside the region first, then use CUA actions to type, set value, press keys, or modify the focused control.")
+        return lines.joined(separator: "\n")
+    }
+
+    private func hoverWindowContextPrompt(_ hoverWindowContext: FocusHighlightWindowContext) -> String {
+        var lines = [
+            "current hover app/window context:",
+            "the user's pointer was over app=\"\(hoverWindowContext.appName)\", bundle_id=\"\(hoverWindowContext.bundleIdentifier ?? "unknown")\", pid=\(hoverWindowContext.processIdentifier), window_title=\"\(hoverWindowContext.windowTitle ?? "")\" when they started speaking.",
+            "treat this as the target app/window for this request unless the user explicitly asks to switch apps."
+        ]
+
+        if let textSelection = lastHoverTextSelectionContext {
+            lines.append("active text selection in that app: selected_text=\"\(Self.promptEscapedText(textSelection.selectedText, maxLength: 900))\", source=\"\(textSelection.source)\", focused_role=\"\(textSelection.focusedElementRole ?? "unknown")\", selected_range_location=\(textSelection.selectedTextRangeLocation.map(String.init) ?? "unknown"), selected_range_length=\(textSelection.selectedTextRangeLength.map(String.init) ?? "unknown").")
+            lines.append("critical selected-text rule: if the user asks to replace, rewrite, delete, format, or otherwise edit the selected text, preserve the existing selection. do not click the selected words first because that can collapse the selection. use a direct type, pressKey, keyboardShortcut, setValue, or app menu action against the already-focused selection. for a one-word change, type only the replacement word, not the surrounding paragraph.")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func screenshotRectDescription(
+        for context: FocusHighlightContext,
+        capture: CompanionScreenCapture
+    ) -> String? {
+        let intersection = context.globalAppKitBoundingRect.intersection(capture.displayFrame)
+        guard !intersection.isNull, intersection.width > 0, intersection.height > 0 else {
+            return nil
+        }
+
+        let xScale = CGFloat(capture.screenshotWidthInPixels) / CGFloat(capture.displayWidthInPoints)
+        let yScale = CGFloat(capture.screenshotHeightInPixels) / CGFloat(capture.displayHeightInPoints)
+
+        let localMinX = intersection.minX - capture.displayFrame.minX
+        let localMaxX = intersection.maxX - capture.displayFrame.minX
+        let localTopY = capture.displayFrame.maxY - intersection.maxY
+        let localBottomY = capture.displayFrame.maxY - intersection.minY
+
+        let pixelMinX = Int(localMinX * xScale)
+        let pixelMaxX = Int(localMaxX * xScale)
+        let pixelTopY = Int(localTopY * yScale)
+        let pixelBottomY = Int(localBottomY * yScale)
+
+        let normalizedY1 = Int((CGFloat(pixelTopY) / CGFloat(capture.screenshotHeightInPixels)) * 1000)
+        let normalizedX1 = Int((CGFloat(pixelMinX) / CGFloat(capture.screenshotWidthInPixels)) * 1000)
+        let normalizedY2 = Int((CGFloat(pixelBottomY) / CGFloat(capture.screenshotHeightInPixels)) * 1000)
+        let normalizedX2 = Int((CGFloat(pixelMaxX) / CGFloat(capture.screenshotWidthInPixels)) * 1000)
+
+        return "relative to the latest screenshot labeled \"\(capture.label)\": pixel rect x=\(pixelMinX), y=\(pixelTopY), width=\(pixelMaxX - pixelMinX), height=\(pixelBottomY - pixelTopY); normalized box_2d=[\(normalizedY1), \(normalizedX1), \(normalizedY2), \(normalizedX2)]."
+    }
+
+    private static func windowContext(at globalAppKitPoint: CGPoint) -> FocusHighlightWindowContext? {
+        let ownProcessIdentifier = NSRunningApplication.current.processIdentifier
+        return WindowEnumerator.visibleWindows()
+            .filter { $0.layer == 0 }
+            .filter { $0.pid > 0 && $0.pid != ownProcessIdentifier }
+            .filter { windowInfo in
+                let frame = appKitFrame(from: windowInfo.bounds)
+                return frame.contains(globalAppKitPoint)
+            }
+            .max(by: { $0.zIndex < $1.zIndex })
+            .map(windowContext(from:))
+    }
+
+    private static func windowContext(
+        intersecting highlightedBoundingRect: CGRect,
+        paintedPoints: [CGPoint]
+    ) -> FocusHighlightWindowContext? {
+        guard !highlightedBoundingRect.isNull else { return nil }
+
+        let ownProcessIdentifier = NSRunningApplication.current.processIdentifier
+        return WindowEnumerator.visibleWindows()
+            .filter { $0.layer == 0 }
+            .filter { $0.pid > 0 && $0.pid != ownProcessIdentifier }
+            .compactMap { windowInfo -> (windowInfo: WindowInfo, score: CGFloat)? in
+                let frame = appKitFrame(from: windowInfo.bounds)
+                let intersection = frame.intersection(highlightedBoundingRect)
+                let pointsInsideCount = paintedPoints.filter { frame.contains($0) }.count
+                guard !intersection.isNull || pointsInsideCount > 0 else { return nil }
+
+                let intersectionArea = max(0, intersection.width) * max(0, intersection.height)
+                let pointScore = CGFloat(pointsInsideCount) * 10_000
+                let zScore = CGFloat(windowInfo.zIndex)
+                return (windowInfo, pointScore + intersectionArea + zScore)
+            }
+            .max(by: { $0.score < $1.score })
+            .map { windowContext(from: $0.windowInfo) }
+    }
+
+    private static func textSelectionContext(
+        for windowContext: FocusHighlightWindowContext?,
+        intersecting highlightedBoundingRect: CGRect? = nil,
+        paintedPoints: [CGPoint] = []
+    ) -> FocusHighlightTextSelectionContext? {
+        guard let processIdentifier = windowContext?.processIdentifier else { return nil }
+
+        let axApp = AXUIElementCreateApplication(processIdentifier)
+        AXUIElementSetMessagingTimeout(axApp, 0.2)
+
+        var focusedElementRef: AnyObject?
+        if AXUIElementCopyAttributeValue(axApp, kAXFocusedUIElementAttribute as CFString, &focusedElementRef) == .success,
+           let focusedElementRef {
+            let focusedElement = focusedElementRef as! AXUIElement
+
+            if highlightedBoundingRect == nil
+                || globalAppKitFrame(of: focusedElement)?.insetBy(dx: -12, dy: -12).intersects(highlightedBoundingRect!) == true {
+                var selectedTextRef: AnyObject?
+                if AXUIElementCopyAttributeValue(focusedElement, "AXSelectedText" as CFString, &selectedTextRef) == .success,
+                   let selectedText = selectedTextRef as? String {
+                    let trimmedSelectedText = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmedSelectedText.isEmpty {
+                        var roleRef: AnyObject?
+                        AXUIElementCopyAttributeValue(focusedElement, kAXRoleAttribute as CFString, &roleRef)
+
+                        var selectedRangeLocation: Int?
+                        var selectedRangeLength: Int?
+                        var selectedRangeRef: AnyObject?
+                        if AXUIElementCopyAttributeValue(focusedElement, "AXSelectedTextRange" as CFString, &selectedRangeRef) == .success,
+                           let selectedRangeValue = selectedRangeRef,
+                           CFGetTypeID(selectedRangeValue) == AXValueGetTypeID() {
+                            var selectedRange = CFRange()
+                            if AXValueGetValue(selectedRangeValue as! AXValue, .cfRange, &selectedRange) {
+                                selectedRangeLocation = selectedRange.location
+                                selectedRangeLength = selectedRange.length
+                            }
+                        }
+
+                        return FocusHighlightTextSelectionContext(
+                            selectedText: trimmedSelectedText,
+                            focusedElementRole: roleRef as? String,
+                            selectedTextRangeLocation: selectedRangeLocation,
+                            selectedTextRangeLength: selectedRangeLength,
+                            source: "system_selection"
+                        )
+                    }
+                }
+            }
+        }
+
+        guard let highlightedBoundingRect else { return nil }
+        return highlightedTextRangeContext(
+            in: windowContext,
+            intersecting: highlightedBoundingRect,
+            paintedPoints: paintedPoints
+        )
+    }
+
+    private static func highlightedTextRangeContext(
+        in windowContext: FocusHighlightWindowContext?,
+        intersecting highlightedBoundingRect: CGRect,
+        paintedPoints: [CGPoint]
+    ) -> FocusHighlightTextSelectionContext? {
+        guard let processIdentifier = windowContext?.processIdentifier else { return nil }
+
+        let candidatePoints = sampledHighlightPoints(
+            boundingRect: highlightedBoundingRect,
+            paintedPoints: paintedPoints
+        )
+
+        var resolvedFullText: String?
+        var resolvedRole: String?
+        var resolvedRange: CFRange?
+
+        for appKitPoint in candidatePoints {
+            do {
+                let element = try AXInput.elementAt(appKitPointToCoreGraphicsPoint(appKitPoint))
+                var elementProcessIdentifier: pid_t = 0
+                AXUIElementGetPid(element, &elementProcessIdentifier)
+                guard elementProcessIdentifier == processIdentifier else { continue }
+                guard let fullText = AXInput.stringAttribute("AXValue", of: element),
+                      !fullText.isEmpty else { continue }
+
+                var screenPoint = appKitPointToCoreGraphicsPoint(appKitPoint)
+                guard let screenPointValue = AXValueCreate(.cgPoint, &screenPoint) else { continue }
+
+                var rawRangeRef: CFTypeRef?
+                let result = AXUIElementCopyParameterizedAttributeValue(
+                    element,
+                    "AXRangeForPosition" as CFString,
+                    screenPointValue,
+                    &rawRangeRef
+                )
+                guard result == .success,
+                      let rawRangeValue = rawRangeRef,
+                      CFGetTypeID(rawRangeValue) == AXValueGetTypeID() else {
+                    continue
+                }
+
+                var rawRange = CFRange()
+                guard AXValueGetValue(rawRangeValue as! AXValue, .cfRange, &rawRange),
+                      let wordRange = expandedWordRange(around: rawRange, in: fullText) else {
+                    continue
+                }
+
+                if resolvedFullText == nil {
+                    resolvedFullText = fullText
+                    resolvedRole = AXInput.stringAttribute("AXRole", of: element)
+                    resolvedRange = wordRange
+                } else if resolvedFullText == fullText,
+                          let currentRange = resolvedRange {
+                    let unionStart = min(currentRange.location, wordRange.location)
+                    let unionEnd = max(
+                        currentRange.location + currentRange.length,
+                        wordRange.location + wordRange.length
+                    )
+                    resolvedRange = CFRange(location: unionStart, length: unionEnd - unionStart)
+                }
+            } catch {
+                continue
+            }
+        }
+
+        guard let resolvedFullText,
+              let resolvedRange else {
+            return nil
+        }
+
+        let nsText = resolvedFullText as NSString
+        let selectedText = nsText
+            .substring(with: NSRange(location: resolvedRange.location, length: resolvedRange.length))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selectedText.isEmpty else { return nil }
+
+        return FocusHighlightTextSelectionContext(
+            selectedText: selectedText,
+            focusedElementRole: resolvedRole,
+            selectedTextRangeLocation: resolvedRange.location,
+            selectedTextRangeLength: resolvedRange.length,
+            source: "painted_highlight"
+        )
+    }
+
+    private static func expandedWordRange(around rawRange: CFRange, in text: String) -> CFRange? {
+        let nsText = text as NSString
+        let textLength = nsText.length
+        guard textLength > 0 else { return nil }
+
+        let rawLocation = min(max(rawRange.location, 0), textLength - 1)
+        var candidateIndex = rawLocation
+
+        let wordCharacterSet = CharacterSet.alphanumerics
+            .union(CharacterSet(charactersIn: "'’_-"))
+
+        func isWordCharacter(at utf16Index: Int) -> Bool {
+            guard utf16Index >= 0, utf16Index < textLength,
+                  let scalar = UnicodeScalar(Int(nsText.character(at: utf16Index))) else {
+                return false
+            }
+            return wordCharacterSet.contains(scalar)
+        }
+
+        if !isWordCharacter(at: candidateIndex) {
+            if candidateIndex > 0, isWordCharacter(at: candidateIndex - 1) {
+                candidateIndex -= 1
+            } else {
+                var nearbyWordIndex: Int?
+                for offset in 1...24 {
+                    let rightIndex = candidateIndex + offset
+                    if rightIndex < textLength, isWordCharacter(at: rightIndex) {
+                        nearbyWordIndex = rightIndex
+                        break
+                    }
+
+                    let leftIndex = candidateIndex - offset
+                    if leftIndex >= 0, isWordCharacter(at: leftIndex) {
+                        nearbyWordIndex = leftIndex
+                        break
+                    }
+                }
+
+                guard let nearbyWordIndex else { return nil }
+                candidateIndex = nearbyWordIndex
+            }
+        }
+
+        var startIndex = candidateIndex
+        while startIndex > 0, isWordCharacter(at: startIndex - 1) {
+            startIndex -= 1
+        }
+
+        var endIndex = candidateIndex + 1
+        while endIndex < textLength, isWordCharacter(at: endIndex) {
+            endIndex += 1
+        }
+
+        guard endIndex > startIndex else { return nil }
+        return CFRange(location: startIndex, length: endIndex - startIndex)
+    }
+
+    private static func elementContext(
+        in windowContext: FocusHighlightWindowContext?,
+        intersecting highlightedBoundingRect: CGRect,
+        paintedPoints: [CGPoint]
+    ) -> FocusHighlightElementContext? {
+        guard let processIdentifier = windowContext?.processIdentifier else { return nil }
+
+        let candidatePoints = sampledHighlightPoints(
+            boundingRect: highlightedBoundingRect,
+            paintedPoints: paintedPoints
+        )
+
+        for appKitPoint in candidatePoints {
+            do {
+                let element = try AXInput.elementAt(appKitPointToCoreGraphicsPoint(appKitPoint))
+                var elementProcessIdentifier: pid_t = 0
+                AXUIElementGetPid(element, &elementProcessIdentifier)
+                guard elementProcessIdentifier == processIdentifier else { continue }
+
+                return FocusHighlightElementContext(
+                    role: AXInput.stringAttribute("AXRole", of: element),
+                    title: AXInput.stringAttribute("AXTitle", of: element),
+                    value: AXInput.stringAttribute("AXValue", of: element),
+                    description: AXInput.stringAttribute("AXDescription", of: element),
+                    globalAppKitFrame: globalAppKitFrame(of: element)
+                )
+            } catch {
+                continue
+            }
+        }
+
+        return nil
+    }
+
+    private static func sampledHighlightPoints(
+        boundingRect: CGRect,
+        paintedPoints: [CGPoint]
+    ) -> [CGPoint] {
+        var points: [CGPoint] = []
+
+        if let lastPoint = paintedPoints.last {
+            points.append(lastPoint)
+        }
+        points.append(CGPoint(x: boundingRect.midX, y: boundingRect.midY))
+        points.append(CGPoint(x: boundingRect.minX + boundingRect.width * 0.25, y: boundingRect.midY))
+        points.append(CGPoint(x: boundingRect.minX + boundingRect.width * 0.75, y: boundingRect.midY))
+        points.append(CGPoint(x: boundingRect.midX, y: boundingRect.minY + boundingRect.height * 0.25))
+        points.append(CGPoint(x: boundingRect.midX, y: boundingRect.minY + boundingRect.height * 0.75))
+        points.append(contentsOf: paintedPoints.suffix(6))
+
+        var seen = Set<String>()
+        return points.filter { point in
+            let key = "\(Int(point.x)):\(Int(point.y))"
+            return seen.insert(key).inserted
+        }
+    }
+
+    private static func globalAppKitFrame(of element: AXUIElement) -> CGRect? {
+        guard let screenRect = AXInput.screenBoundingRect(of: element) else { return nil }
+        return coreGraphicsRectToAppKitRect(screenRect)
+    }
+
+    private static func boundingRect(for points: [CGPoint]) -> CGRect {
+        points.reduce(CGRect.null) { partialRect, point in
+            partialRect.union(CGRect(origin: point, size: .zero))
+        }.insetBy(dx: -12, dy: -12)
+    }
+
+    private static func windowContext(from windowInfo: WindowInfo) -> FocusHighlightWindowContext {
+        let processIdentifier = pid_t(windowInfo.pid)
+        let runningApplication = NSRunningApplication(processIdentifier: processIdentifier)
+        return FocusHighlightWindowContext(
+            windowID: windowInfo.id,
+            appName: runningApplication?.localizedName ?? windowInfo.owner,
+            bundleIdentifier: runningApplication?.bundleIdentifier,
+            processIdentifier: processIdentifier,
+            windowTitle: windowInfo.name,
+            globalAppKitFrame: appKitFrame(from: windowInfo.bounds)
+        )
+    }
+
+    private static func appKitFrame(from windowBounds: WindowBounds) -> CGRect {
+        coreGraphicsRectToAppKitRect(
+            CGRect(
+                x: windowBounds.x,
+                y: windowBounds.y,
+                width: windowBounds.width,
+                height: windowBounds.height
+            )
+        )
+    }
+
+    private static func promptEscapedText(_ text: String, maxLength: Int) -> String {
+        let clippedText = text.count > maxLength ? "\(text.prefix(maxLength))..." : text
+        return clippedText
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+    }
+
+    private static func appKitPointToCoreGraphicsPoint(_ appKitPoint: CGPoint) -> CGPoint {
+        let primaryScreen = NSScreen.screens.first(where: { $0.frame.origin == .zero })
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        guard let primaryScreen else { return appKitPoint }
+        return CGPoint(
+            x: appKitPoint.x,
+            y: primaryScreen.frame.height - appKitPoint.y
+        )
+    }
+
+    private static func coreGraphicsRectToAppKitRect(_ coreGraphicsRect: CGRect) -> CGRect {
+        let primaryScreen = NSScreen.screens.first(where: { $0.frame.origin == .zero })
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        guard let primaryScreen else { return coreGraphicsRect }
+        return CGRect(
+            x: coreGraphicsRect.minX,
+            y: primaryScreen.frame.height - coreGraphicsRect.maxY,
+            width: coreGraphicsRect.width,
+            height: coreGraphicsRect.height
+        )
+    }
+
     /// Fly the cursor to a resolved element. The Resolution already contains
     /// global AppKit coordinates — no further conversion needed.
     private func pointAtResolution(_ resolution: ElementResolver.Resolution) {
@@ -820,7 +1470,8 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Companion Prompt
 
-    private static let companionVoiceResponseSystemPrompt = """
+    private static var companionVoiceResponseSystemPrompt: String {
+        """
     you're tiptour, a friendly always-on companion that lives in the user's menu bar. you can see the user's screen(s) at all times via streaming screenshots, and you can hear them when they speak. your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
     SILENCE-AT-CONNECT RULE (CRITICAL — read every time):
@@ -847,6 +1498,8 @@ final class CompanionManager: ObservableObject {
 
     you have exactly TWO tools. call AT MOST ONE tool per turn. do NOT narrate before the tool call. call it silently, wait for the response, THEN speak ONCE.
 
+    \(Self.multiStepTourGuidePromptRule)
+
     TOOL: point_at_element(label, box_2d?)
       use for a SINGLE visible element. examples: "where's the save button", "point at the color inspector", "what is this tab".
       label = literal visible text on screen.
@@ -855,6 +1508,9 @@ final class CompanionManager: ObservableObject {
     UI ELEMENT HINTS (set-of-marks):
     alongside screenshots you will sometimes receive a "UI elements on screen" message listing pointable elements as [role:label] tokens — for example [button:Save] [menu:File] [item:New File...] [tab:Preview] [field:Search].
     these labels come straight from the accessibility tree, so they are guaranteed to resolve. when a listed element matches what the user asked for, pass that EXACT label string (the part after the colon) to point_at_element or to a workflow step. if nothing matches, fall back to the visible text you see in the screenshot.
+
+    FOCUS HIGHLIGHT CONTEXT:
+    the user can hold control plus shift and paint a freeform highlight over part of the screen. when they do, you receive a "user focus highlight context" message with a global rect, a current hover / last painted point, the hovered app/window target, and usually a normalized box_2d for the latest screenshot. treat phrases like "this", "that line", "this area", "rewrite this", "change this", "make this better", or "update the highlighted part" as referring to that highlighted region inside that hovered app/window. prefer visible elements, text fields, and text ranges that intersect the highlighted region. when an action should operate on that highlighted region, set targetContext:"currentHighlight" on the action step. when it should operate on a normal native selection, set targetContext:"currentSelection". when it should operate on the currently focused field, set targetContext:"focusedElement". do not type into some other app unless the user explicitly asks to switch apps.
 
     LANGUAGE RULE (CRITICAL — read every time):
     the user may speak in ANY language. you respond in their language. but tool LABELS are different — they must EXACTLY match what is shown on the user's screen, in whatever language the UI is set to. you NEVER translate UI labels to match the user's spoken language.
@@ -888,7 +1544,7 @@ final class CompanionManager: ObservableObject {
       arguments:
         goal  = short summary of the user's intent ("create a new file", "render an animation").
         app   = exact foreground app name visible in the screenshot ("Blender", "Xcode", "GarageBand"). never "macOS" or "unknown".
-        steps = ordered array of {type?, label, hint, box_2d?}. first step MUST be visible on the current screen. subsequent steps describe the path to take after clicking step 1.
+        steps = ordered array of {type?, label, hint, targetContext?, box_2d?}. first step MUST be visible on the current screen unless it has targetContext:"currentHighlight", targetContext:"currentSelection", or targetContext:"focusedElement". subsequent steps describe the path to take after clicking step 1.
         box_2d = OPTIONAL bounding box for the step's element in [y1, x1, y2, x2] form, each value in [0, 1000] normalized to the current screenshot. origin top-left, y first. include it whenever you can on step 1 — it's how this model is natively trained to localize. ALWAYS include it for apps without accessibility (Blender, games, canvas tools).
 
     STEP TYPES (for submit_workflow_plan):
@@ -898,15 +1554,41 @@ final class CompanionManager: ObservableObject {
         label = literal visible text on screen (the element to click).
         use this for menus, buttons, tabs, items, links, fields you need to focus by clicking, anything you can SEE.
 
+      type: "rightClick" / "doubleClick"
+        label = literal visible text on screen. use only when the user explicitly asks for a context menu or double-click behavior.
+
+      type: "openApp"
+        label = exact application name to launch or foreground (e.g. "Safari", "Finder", "Activity Monitor", "Xcode").
+        use this when the user says "open X", "launch X", or the next step requires starting an app that is not already visible.
+
+      type: "openURL"
+        label = exact URL or file/folder path to open (e.g. "https://youtube.com", "https://github.com", "/Users/milindsoni/Desktop").
+        use this when the user asks to open a website/link/path directly. if a browser/app is specified, put it in the plan's `app` field.
+
       type: "keyboardShortcut"
         label = the shortcut combo as written (e.g. "Cmd+S", "Cmd+Shift+N", "Cmd+Space", "Return", "Escape").
         ONLY use when the action is purely a key press, not a click. examples: confirming a dialog with Return, opening Spotlight with Cmd+Space, saving with Cmd+S when the user explicitly wants the shortcut path. never use this just because there IS a shortcut — if the user can ALSO click File → Save, prefer the click steps so the user learns the menu path.
         modifier names recognized: Cmd / Command, Opt / Option / Alt, Ctrl / Control, Shift, Fn. key names: letters, digits, Space, Return, Tab, Escape, Delete, Left/Right/Up/Down, Home, End, PageUp, PageDown, F1-F12.
 
+      type: "pressKey"
+        label = one key name only (e.g. "Return", "Escape", "Tab", "PageDown", "Down").
+        use when no modifiers are involved.
+
       type: "type"
         label = the literal text to type into the currently focused field.
         ONLY use after a step has focused a text field (clicking it, or a Cmd+N that opens a fresh field). NEVER chain two `type` steps — concatenate the text into one step instead.
         do NOT translate the text. if the user said "type 'on my way'", the label is exactly `on my way`, not the user's spoken language.
+        if the user said to rewrite/change/delete/replace the current highlighted area, include targetContext:"currentHighlight" and type ONLY the replacement text.
+
+      type: "setValue"
+        value = the value to set on the currently focused native AX element. use sparingly; prefer `type` for normal text fields.
+
+      targetContext:
+        optional grounding field for any step. use targetContext:"currentHighlight" when the user refers to the painted highlight or "this highlighted part"; targetContext:"currentSelection" for a normal selected text range; targetContext:"focusedElement" for the active field; targetContext:"visibleElement" for ordinary screen labels. targetContext tells TipTour what app/window/element/range to bind the action to, so it is safer than clicking before typing.
+
+      type: "scroll"
+        direction = "up" | "down" | "left" | "right"; amount = small integer; by = "line" or "page".
+        use for "scroll down", "go lower", "page down", or when a later visible target is below the current viewport.
 
     SECURE-FIELD RULE (CRITICAL — read every time):
     NEVER emit a `type` step targeting a password / passcode / 2FA / credit-card / secret-token field, even if the user asks. AX marks these as secure-text inputs; pasting into them via autopilot would echo the user's secrets through the system pasteboard. instead, click the field with a regular click step so the cursor lands there, and let the user type the secret themselves. for the spoken narration say something like "i'll bring you to the password field — type it yourself".
@@ -965,11 +1647,14 @@ final class CompanionManager: ObservableObject {
       → speak: "making a Photos folder."
 
     user: "open Activity Monitor"
-      → submit_workflow_plan(goal: "launch Activity Monitor", app: "Spotlight",
-           steps: [{type:"keyboardShortcut", label:"Cmd+Space", hint:"Open Spotlight"},
-                   {type:"type", label:"Activity Monitor", hint:"Search for the app"},
-                   {type:"keyboardShortcut", label:"Return", hint:"Launch it"}])
+      → submit_workflow_plan(goal: "launch Activity Monitor", app: "Activity Monitor",
+           steps: [{type:"openApp", label:"Activity Monitor", hint:"Open Activity Monitor"}])
       → speak: "opening Activity Monitor."
+
+    user: "open youtube.com"
+      → submit_workflow_plan(goal: "open youtube.com", app: "Safari",
+           steps: [{type:"openURL", label:"https://youtube.com", hint:"Open youtube.com"}])
+      → speak: "opening youtube.com."
 
     user: "send 'on my way' to mom in messages"
       (Messages is foreground, the user is in mom's thread)
@@ -986,6 +1671,19 @@ final class CompanionManager: ObservableObject {
       → no tool
       → speak your answer
     """
+    }
+
+    private static var multiStepTourGuidePromptRule: String {
+        let isEnabled = UserDefaults.standard.object(forKey: "isMultiStepTourGuideEnabled") == nil
+            ? false
+            : UserDefaults.standard.bool(forKey: "isMultiStepTourGuideEnabled")
+
+        if isEnabled {
+            return "MULTI-STEP TOUR GUIDE MODE: enabled. you may use submit_workflow_plan for teaching-style walkthroughs when the user asks \"how do i\", \"show me\", \"walk me through\", or \"teach me\"."
+        }
+
+        return "MULTI-STEP TOUR GUIDE MODE: disabled. do not use submit_workflow_plan for teaching-style walkthroughs where the user is supposed to click step by step. use submit_workflow_plan only when TipTour should actually perform actions in Autopilot. if the user asks \"how do i\", \"show me\", \"walk me through\", or \"teach me\", answer conversationally or point at one visible element instead of creating a guided tour."
+    }
 
     // MARK: - Image Conversion
 
@@ -998,14 +1696,135 @@ final class CompanionManager: ObservableObject {
 
     /// Execute a workflow plan emitted by Gemini.
     private func startWorkflowPlan(_ plan: WorkflowPlan) {
-        print("[Workflow] received plan from LLM: \"\(plan.goal)\" (\(plan.steps.count) steps)")
+        let effectivePlan = planForCurrentFocusHighlightIfNeeded(plan)
+        print("[Workflow] received plan from LLM: \"\(effectivePlan.goal)\" (\(effectivePlan.steps.count) steps, app=\(effectivePlan.app ?? "?"))")
         WorkflowRunner.shared.start(
-            plan: plan,
+            plan: effectivePlan,
             pointHandler: { [weak self] resolution in
                 self?.pointAtResolution(resolution)
             },
             latestCapture: voiceBackend.latestCapture
         )
+    }
+
+    private func planForCurrentFocusHighlightIfNeeded(_ plan: WorkflowPlan) -> WorkflowPlan {
+        if let context = lastFocusHighlightContext,
+           Date().timeIntervalSince(context.createdAt) < 300,
+           let hoveredWindow = context.hoveredWindow,
+           !hoveredWindow.appName.isEmpty {
+            configurePendingTextReplacementRangeIfNeeded(
+                windowContext: hoveredWindow,
+                textSelection: context.textSelection,
+                steps: plan.steps
+            )
+            return WorkflowPlan(
+                goal: plan.goal,
+                app: hoveredWindow.appName,
+                steps: stepsPreservingSelectedTextIfNeeded(
+                    plan.steps,
+                    selectedText: context.textSelection?.selectedText
+                )
+            )
+        }
+
+        if let hoverWindowContext = lastHoverWindowContext,
+           let hoverDate = lastHoverWindowContextDate,
+           Date().timeIntervalSince(hoverDate) < 300,
+           !hoverWindowContext.appName.isEmpty {
+            configurePendingTextReplacementRangeIfNeeded(
+                windowContext: hoverWindowContext,
+                textSelection: lastHoverTextSelectionContext,
+                steps: plan.steps
+            )
+            return WorkflowPlan(
+                goal: plan.goal,
+                app: hoverWindowContext.appName,
+                steps: stepsPreservingSelectedTextIfNeeded(
+                    plan.steps,
+                    selectedText: lastHoverTextSelectionContext?.selectedText
+                )
+            )
+        }
+
+        return plan
+    }
+
+    private func configurePendingTextReplacementRangeIfNeeded(
+        windowContext: FocusHighlightWindowContext,
+        textSelection: FocusHighlightTextSelectionContext?,
+        steps: [WorkflowStep]
+    ) {
+        let hasRangeEditingStep = steps.contains { step in
+            let stepTargetsContext = step.targetContext == .currentHighlight
+                || step.targetContext == .currentSelection
+
+            if step.type == .type || step.type == .setValue {
+                return stepTargetsContext || step.targetContext == nil
+            }
+            guard step.type == .pressKey,
+                  let label = step.label else {
+                return false
+            }
+            let normalizedLabel = label
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: ".,;:"))
+                .lowercased()
+            let isTextDeletionKey = normalizedLabel == "delete"
+                || normalizedLabel == "del"
+                || normalizedLabel == "backspace"
+            return (stepTargetsContext || step.targetContext == nil) && isTextDeletionKey
+        }
+        guard hasRangeEditingStep else { return }
+
+        guard let selectedTextRangeLocation = textSelection?.selectedTextRangeLocation,
+              let selectedTextRangeLength = textSelection?.selectedTextRangeLength,
+              selectedTextRangeLocation >= 0,
+              selectedTextRangeLength > 0 else {
+            return
+        }
+
+        ActionExecutor.shared.setPendingTextReplacementRange(
+            processIdentifier: windowContext.processIdentifier,
+            location: selectedTextRangeLocation,
+            length: selectedTextRangeLength
+        )
+    }
+
+    private func stepsPreservingSelectedTextIfNeeded(
+        _ steps: [WorkflowStep],
+        selectedText: String?
+    ) -> [WorkflowStep] {
+        guard steps.count >= 2,
+              let selectedText,
+              !selectedText.isEmpty else {
+            return steps
+        }
+
+        let firstStep = steps[0]
+        let secondStep = steps[1]
+        let secondStepTargetsExistingContext = secondStep.targetContext == .currentHighlight
+            || secondStep.targetContext == .currentSelection
+        guard firstStep.type == .click || firstStep.type == .doubleClick,
+              secondStep.type == .type || secondStep.type == .pressKey || secondStep.type == .keyboardShortcut || secondStep.type == .setValue,
+              secondStepTargetsExistingContext
+                || (firstStep.label.map {
+                    Self.normalizedTextForSelectionComparison(selectedText)
+                        .contains(Self.normalizedTextForSelectionComparison($0))
+                } ?? false) else {
+            return steps
+        }
+
+        print("[FocusHighlight] preserving existing text context — dropping leading \(firstStep.type.rawValue) step")
+        return Array(steps.dropFirst())
+    }
+
+    private static func normalizedTextForSelectionComparison(_ text: String) -> String {
+        text
+            .lowercased()
+            .replacingOccurrences(of: "\n", with: " ")
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     /// Start a Gemini Live session on hotkey press. Two things run in

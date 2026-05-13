@@ -223,11 +223,59 @@ final class GeminiLiveClient: @unchecked Sendable {
                             "properties": [
                                 "label": [
                                     "type": "string",
-                                    "description": "Literal visible text of the element, or nearest label for an icon."
+                                    "description": "For click: literal visible text of the element, or nearest label for an icon. For openApp: app name, e.g. 'Safari'. For openURL: URL/path, e.g. 'https://apple.com' or '/Users/me/Desktop'. For keyboardShortcut: combo. For type: text to type."
+                                ],
+                                "type": [
+                                    "type": "string",
+                                    "description": "Action type. Omit for normal visible UI clicks.",
+                                    "enum": [
+                                        "click",
+                                        "rightClick",
+                                        "doubleClick",
+                                        "openApp",
+                                        "openURL",
+                                        "keyboardShortcut",
+                                        "pressKey",
+                                        "type",
+                                        "setValue",
+                                        "scroll",
+                                        "waitForState",
+                                        "observe"
+                                    ]
                                 ],
                                 "hint": [
                                     "type": "string",
                                     "description": "Short sentence describing this step — e.g. 'Open the File menu'."
+                                ],
+                                "value": [
+                                    "type": "string",
+                                    "description": "Value for setValue steps. For type steps, prefer label unless a separate value is clearer."
+                                ],
+                                "direction": [
+                                    "type": "string",
+                                    "description": "Direction for scroll steps.",
+                                    "enum": ["up", "down", "left", "right"]
+                                ],
+                                "amount": [
+                                    "type": "integer",
+                                    "description": "Repeat count for scroll steps. Keep small, usually 3-8.",
+                                    "minimum": 1,
+                                    "maximum": 50
+                                ],
+                                "by": [
+                                    "type": "string",
+                                    "description": "Scroll granularity.",
+                                    "enum": ["line", "page"]
+                                ],
+                                "targetContext": [
+                                    "type": "string",
+                                    "description": "Optional grounding target for generic action steps. Use 'currentHighlight' when the user referred to the painted highlight/current highlighted area; use 'currentSelection' for a native selected text range; use 'focusedElement' for the active focused field; use 'visibleElement' for ordinary visible UI targets. This lets TipTour bind type/delete/setValue/click actions to the right app/window/element/range without relying on labels alone.",
+                                    "enum": [
+                                        "visibleElement",
+                                        "currentHighlight",
+                                        "currentSelection",
+                                        "focusedElement"
+                                    ]
                                 ],
                                 "box_2d": [
                                     "type": "array",
