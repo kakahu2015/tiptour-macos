@@ -641,9 +641,11 @@ final class WorkflowRunner: ObservableObject {
             }
 
             // Didn't resolve yet — on a post-click retry the first couple
-            // of attempts can miss because the UI is mid-animation. Short
-            // wait before the next pass.
-            try? await Task.sleep(nanoseconds: 120_000_000)
+            // of attempts can miss because the UI is mid-animation. First
+            // retry is short (most animations land quickly); subsequent
+            // retries use a longer wait to avoid busy-polling.
+            let retryWaitNanoseconds: UInt64 = attemptIndex == 0 ? 60_000_000 : 120_000_000
+            try? await Task.sleep(nanoseconds: retryWaitNanoseconds)
         }
 
         // Ran out of budget. Surface the failure so the UI can prompt

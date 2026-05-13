@@ -864,22 +864,25 @@ final class CompanionManager: ObservableObject {
         let pid = app.processIdentifier
         guard pid > 0 else { return }
         let appElement = AXUIElementCreateApplication(pid)
-        // Cap the messaging timeout per-app too, in case the target's AX
-        // server is slow on first contact.
+        // Set a conservative initial timeout before we know whether the app
+        // is Electron (slower AX server) or native Cocoa (fast).
         AXUIElementSetMessagingTimeout(appElement, 0.4)
         let attributeName = "AXManualAccessibility" as CFString
         let result = AXUIElementSetAttributeValue(appElement, attributeName, kCFBooleanTrue)
         switch result {
         case .success:
-            print("[AX] enabled AXManualAccessibility for \(app.bundleIdentifier ?? "?") (\(app.localizedName ?? "?"))")
+            // Electron app — keep the 0.4s timeout since Electron's AX
+            // bridge can be slower than native Cocoa under load.
+            print("[AX] enabled AXManualAccessibility for \(app.bundleIdentifier ?? "?") (\(app.localizedName ?? "?")), keeping 0.4s AX timeout")
         case .attributeUnsupported, .actionUnsupported:
-            // Non-Electron app — expected.
-            break
+            // Native Cocoa app — AX server responds well under 100ms.
+            // Drop the timeout to 0.15s so a stalled query fails fast
+            // and we fall through to box_2d without a 400ms hang.
+            AXUIElementSetMessagingTimeout(appElement, 0.15)
         case .cannotComplete, .notImplemented:
-            // App not ready / sandboxed — expected for some launchers.
+            // App not ready / sandboxed — keep conservative timeout.
             break
         default:
-            // Anything else is unusual but non-fatal; log for diagnosis.
             print("[AX] AXManualAccessibility set returned \(result.rawValue) for \(app.bundleIdentifier ?? "?")")
         }
     }

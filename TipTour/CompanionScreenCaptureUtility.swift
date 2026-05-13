@@ -173,13 +173,19 @@ enum CompanionScreenCaptureUtility {
         let configuration = SCStreamConfiguration()
         let maxDimension = 1280
         let aspectRatio = CGFloat(display.width) / CGFloat(display.height)
+        let rawWidth: Int
+        let rawHeight: Int
         if display.width >= display.height {
-            configuration.width = maxDimension
-            configuration.height = Int(CGFloat(maxDimension) / aspectRatio)
+            rawWidth = maxDimension
+            rawHeight = Int(CGFloat(maxDimension) / aspectRatio)
         } else {
-            configuration.height = maxDimension
-            configuration.width = Int(CGFloat(maxDimension) * aspectRatio)
+            rawHeight = maxDimension
+            rawWidth = Int(CGFloat(maxDimension) * aspectRatio)
         }
+        // Align to nearest 16-pixel boundary so JPEG encoder never needs
+        // to pad — avoids the internal copy + extra encode pass on odd sizes.
+        configuration.width = (rawWidth + 15) & ~15
+        configuration.height = (rawHeight + 15) & ~15
 
         guard let cgImage = try? await SCScreenshotManager.captureImage(
             contentFilter: filter,
