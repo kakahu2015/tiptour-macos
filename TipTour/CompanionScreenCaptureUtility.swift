@@ -135,7 +135,7 @@ enum CompanionScreenCaptureUtility {
             )
 
             guard let jpegData = NSBitmapImageRep(cgImage: cgImage)
-                    .representation(using: .jpeg, properties: [.compressionFactor: 0.8]) else {
+                    .representation(using: .jpeg, properties: [.compressionFactor: 0.55]) else {
                 continue
             }
 

@@ -132,7 +132,7 @@ final class WorkflowRunner: ObservableObject {
     /// element BEFORE we click — clicking mid-flight feels jarring
     /// and makes the auto-click look like a glitch instead of a
     /// deliberate action.
-    private let autopilotClickDelayAfterArmingSeconds: Double = 0.65
+    private let autopilotClickDelayAfterArmingSeconds: Double = 0.45
 
     /// Closure that returns whether Autopilot mode is currently
     /// enabled. Injected from `CompanionManager` at app start so we
@@ -380,7 +380,7 @@ final class WorkflowRunner: ObservableObject {
             let token = currentOperationToken
             Task { [weak self] in
                 guard let self else { return }
-                let pollInterval: UInt64 = 80_000_000 // 80ms
+                let pollInterval: UInt64 = 50_000_000 // 50ms
                 let maxAttempts = 5
                 var didDetectChange = false
                 for _ in 0..<maxAttempts {
@@ -643,7 +643,7 @@ final class WorkflowRunner: ObservableObject {
             // Didn't resolve yet — on a post-click retry the first couple
             // of attempts can miss because the UI is mid-animation. Short
             // wait before the next pass.
-            try? await Task.sleep(nanoseconds: 200_000_000)
+            try? await Task.sleep(nanoseconds: 120_000_000)
         }
 
         // Ran out of budget. Surface the failure so the UI can prompt
@@ -826,7 +826,7 @@ final class WorkflowRunner: ObservableObject {
                 activatingTargetApp: targetAppForActivePlan()
             )
 
-            try? await Task.sleep(nanoseconds: 180_000_000)
+            try? await Task.sleep(nanoseconds: 100_000_000)
         } catch {
             print("[Workflow] failed to focus text input target \"\(label)\": \(error.localizedDescription)")
         }

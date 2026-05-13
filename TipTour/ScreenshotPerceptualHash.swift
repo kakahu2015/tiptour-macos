@@ -26,7 +26,7 @@ enum ScreenshotPerceptualHash {
     /// are considered "the same scene." 5 bits is the conventional dHash
     /// threshold — robust to cursor twitches and antialiasing while still
     /// catching meaningful UI changes (a new dialog, scrolled content, etc).
-    static let sameSceneHammingThreshold: Int = 5
+    static let sameSceneHammingThreshold: Int = 8
 
     /// Compute a 64-bit dHash from JPEG image data. Returns nil if the
     /// JPEG can't be decoded — caller should treat that as "send the
