@@ -148,6 +148,26 @@ final class ActionExecutor {
             for: targetProcessIdentifier
         )
 
+        // Three-tier text input strategy, tried in order:
+        //
+        // 1. AX setAttribute("AXSelectedText") — zero-latency, preserves
+        //    undo history, works on native Cocoa text fields. Silently
+        //    succeeds even when the element lost focus, so we verify by
+        //    reading AXValue back.
+        //
+        // 2. Clipboard Cmd+V — works in rich web editors (Google Docs,
+        //    Notion web, etc.) that swallow AX writes but accept paste.
+        //    Required for highlight-replacement where the selection range
+        //    must be set before the paste lands; we don't fall through to
+        //    typeCharacters in that case.
+        //
+        // 3. KeyboardInput.typeCharacters — CGEvent Unicode injection,
+        //    character by character. Works everywhere that accepts keyboard
+        //    input: Safari address bar, web content areas, Electron views,
+        //    terminal emulators, games. No dependency on AX focus or
+        //    pasteboard. Used as the final fallback when both AX and
+        //    clipboard paths fail or aren't applicable.
+
         do {
             let focusedElement = try AXInput.focusedElement(pid: targetProcessIdentifier)
             if hasArmedHighlightReplacementRange {
@@ -161,18 +181,65 @@ final class ActionExecutor {
                 on: focusedElement,
                 value: text as CFString
             )
-            print("[ActionExecutor] CUA inserted \(text.count) characters via AX on pid=\(targetProcessIdentifier)")
-        } catch {
+
+            // Verify insertion landed by reading AXValue. AXSelectedText
+            // can silently succeed on an element that has already lost
+            // focus (e.g. Safari address bar after TipTour activates).
+            var valueRef: AnyObject?
+            let readResult = AXUIElementCopyAttributeValue(focusedElement, "AXValue" as CFString, &valueRef)
+            let currentValue = readResult == .success ? (valueRef as? String ?? "") : ""
+            let insertionVerified = currentValue.contains(text)
+
+            if insertionVerified {
+                print("[ActionExecutor] CUA inserted \(text.count) characters via AX on pid=\(targetProcessIdentifier)")
+                return
+            }
+
+            // AX write silently failed — element wasn't truly focused.
+            print("[ActionExecutor] AX insert silently failed (value unchanged) — trying clipboard then typeCharacters on pid=\(targetProcessIdentifier)")
             guard !hasArmedHighlightReplacementRange else {
-                print("[ActionExecutor] refused key-event fallback because highlighted range could not be applied: \(error)")
+                // Highlight replacement requires the precise AX selection
+                // range that was just applied. Clipboard paste would land
+                // at an arbitrary cursor position. typeCharacters has the
+                // same problem. Surface the error so the caller can
+                // report it to the user instead of pasting in the wrong place.
                 throw ActionExecutorError.highlightedTextRangeUnavailable
             }
 
-            try await pasteTextUsingClipboard(
-                text,
-                toPid: targetProcessIdentifier
-            )
-            print("[ActionExecutor] CUA pasted \(text.count) characters via clipboard hotkey on pid=\(targetProcessIdentifier)")
+            // Tier 2: clipboard paste.
+            do {
+                try await pasteTextUsingClipboard(text, toPid: targetProcessIdentifier)
+                print("[ActionExecutor] CUA pasted \(text.count) characters via clipboard on pid=\(targetProcessIdentifier)")
+                return
+            } catch {
+                print("[ActionExecutor] clipboard paste failed — falling back to typeCharacters: \(error.localizedDescription)")
+            }
+
+            // Tier 3: CGEvent Unicode injection via system HID tap (no pid).
+            // This is identical to a real user typing — events route through
+            // the frontmost app's focused field. Works in Chrome, Safari,
+            // Electron, web content areas, and any app that accepts keyboard.
+            // We do NOT pass toPid here because pid-routed keyboard events
+            // are filtered by Chromium and other sandboxed apps.
+            try KeyboardInput.typeCharacters(text)
+            print("[ActionExecutor] CUA typed \(text.count) characters via HID tap on pid=\(targetProcessIdentifier)")
+
+        } catch {
+            guard !hasArmedHighlightReplacementRange else {
+                print("[ActionExecutor] refused fallback — highlighted range could not be applied: \(error)")
+                throw ActionExecutorError.highlightedTextRangeUnavailable
+            }
+
+            // AX focusedElement lookup itself failed. Try clipboard, then
+            // HID-tap typeCharacters (same reasoning as tier 3 above).
+            do {
+                try await pasteTextUsingClipboard(text, toPid: targetProcessIdentifier)
+                print("[ActionExecutor] CUA pasted \(text.count) characters via clipboard on pid=\(targetProcessIdentifier)")
+            } catch {
+                print("[ActionExecutor] clipboard also failed — using HID tap typeCharacters: \(error.localizedDescription)")
+                try KeyboardInput.typeCharacters(text)
+                print("[ActionExecutor] CUA typed \(text.count) characters via CGEvent Unicode on pid=\(targetProcessIdentifier)")
+            }
         }
     }
 

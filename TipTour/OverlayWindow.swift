@@ -54,6 +54,7 @@ class OverlayWindow: NSWindow {
 
 // Lucide mouse-pointer-2 shape from
 // /Users/milindsoni/Documents/mywork/tip-tour/.agents/mouse-pointer-2.svg.
+
 // Ported into SwiftUI so the macOS app uses the same cursor silhouette
 // as the web TipTour project.
 struct CursorArrowShape: Shape {
@@ -200,20 +201,8 @@ struct BlueCursorView: View {
     @State private var cursorPosition: CGPoint
     @State private var isCursorOnThisScreen: Bool
 
-    /// Horizontal offset from `cursorPosition` to the LEFT edge of
-    /// bubbles / labels that sit next to the cursor. Needs to clear
-    /// the visible cursor glyph so the bubble doesn't get overdrawn.
-    /// Triangle is 16pt wide (±8), cat is 32pt (±16) — so we push
-    /// the bubble further right in Neko mode.
-    private var bubbleLeftOffsetFromCursor: CGFloat {
-        companionManager.isNekoModeEnabled ? 22 : 10
-    }
-
-    /// Vertical offset from `cursorPosition` to the TOP edge of
-    /// bubbles. Same sizing logic as the horizontal offset.
-    private var bubbleTopOffsetFromCursor: CGFloat {
-        companionManager.isNekoModeEnabled ? 24 : 18
-    }
+    private var bubbleLeftOffsetFromCursor: CGFloat { 10 }
+    private var bubbleTopOffsetFromCursor: CGFloat { 18 }
 
     init(screenFrame: CGRect, isFirstAppearance: Bool, companionManager: CompanionManager) {
         self.screenFrame = screenFrame
@@ -294,7 +283,7 @@ struct BlueCursorView: View {
     /// and animated to 0.0 over ~0.3s after landing for a smooth dissolve.
     @State private var flightTrailOpacity: Double = 0.0
 
-    private let fullWelcomeMessage = "hey! i'm tiptour"
+    private let fullWelcomeMessage = "hey! i'm pointpilot"
 
     private let navigationPointerPhrases = [
         "right here!",
@@ -318,8 +307,7 @@ struct BlueCursorView: View {
                 committedContext: nil
             )
 
-            if !companionManager.isNekoModeEnabled
-                && companionManager.globalPushToTalkShortcutMonitor.isShortcutCurrentlyPressed
+            if companionManager.globalPushToTalkShortcutMonitor.isShortcutCurrentlyPressed
                 && buddyNavigationMode == .followingCursor {
                 CursorStreakTrailView(trailPoints: followingTrailPoints)
                     .opacity(buddyIsVisibleOnThisScreen ? cursorOpacity : 0)
@@ -427,40 +415,11 @@ struct BlueCursorView: View {
                     }
             }
 
-            // Trail rendered BEHIND the buddy during a programmatic bezier
-            // flight. Neko mode still leaves paw-print footprints behind
-            // the running cat. The default-mode glow trail was removed —
-            // during a flight to a UI element the buddy alone communicates
-            // intent and the trailing line was noisy / distracting.
-            if companionManager.isNekoModeEnabled {
-                PawPrintTrailView(trailPoints: flightTrailPoints)
-                    .opacity(flightTrailOpacity)
-                    .allowsHitTesting(false)
-            }
-
             // Default arrow cursor — shown when idle or while TTS is playing (responding).
             // All three states (arrow, waveform, spinner) stay in the view tree
             // permanently and cross-fade via opacity so SwiftUI doesn't remove/re-insert
             // them (which caused a visible cursor "pop").
-            //
-            // During cursor following: fast spring animation for snappy tracking.
-            // Neko mode swaps the arrow for a pixel-art cat
-            // that picks its own directional sprite from the cursor's
-            // velocity and animates a 2-frame run cycle. Behavior is
-            // unchanged — purely a visual personality toggle.
-            if companionManager.isNekoModeEnabled {
-                NekoCursorView(
-                    position: cursorPosition,
-                    opacity: buddyIsVisibleOnThisScreen ? cursorOpacity : 0,
-                    flightScale: buddyFlightScale
-                )
-                .animation(
-                    buddyNavigationMode == .followingCursor
-                        ? .spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0)
-                        : nil,
-                    value: cursorPosition
-                )
-            } else {
+            do {
                 // During navigation: NO implicit animation — the frame-by-frame bezier
                 // timer controls position directly at 60fps for a smooth arc flight.
                 ZStack {
@@ -651,8 +610,7 @@ struct BlueCursorView: View {
     }
 
     private func updateFollowingTrail(nextCursorPosition: CGPoint) {
-        guard !companionManager.isNekoModeEnabled,
-              companionManager.globalPushToTalkShortcutMonitor.isShortcutCurrentlyPressed,
+        guard companionManager.globalPushToTalkShortcutMonitor.isShortcutCurrentlyPressed,
               isCursorOnThisScreen,
               buddyNavigationMode == .followingCursor else {
             followingTrailPoints.removeAll()
@@ -766,17 +724,7 @@ struct BlueCursorView: View {
         let deltaY = endPosition.y - startPosition.y
         let distance = hypot(deltaX, deltaY)
 
-        // Flight duration scales with distance: short hops are quick, long
-        // flights are more dramatic. Clamped to 0.6s–1.4s for the triangle.
-        // Neko mode runs longer — the cat sprite reads as "running" so a
-        // leisurely pace feels more natural than an arrow's fast arc.
-        let isNekoMode = companionManager.isNekoModeEnabled
-        let flightDurationSeconds: Double = {
-            if isNekoMode {
-                return min(max(distance / 500.0, 1.2), 2.4)
-            }
-            return min(max(distance / 800.0, 0.6), 1.4)
-        }()
+        let flightDurationSeconds: Double = min(max(distance / 800.0, 0.6), 1.4)
         let frameInterval: Double = 1.0 / 60.0
         let totalFrames = Int(flightDurationSeconds / frameInterval)
         var currentFrame = 0

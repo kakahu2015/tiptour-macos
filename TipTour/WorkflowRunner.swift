@@ -423,15 +423,21 @@ final class WorkflowRunner: ObservableObject {
         }
 
         let nextStepIndex = activeStepIndex + 1
+
+        // Last step in the plan — there's nothing that depends on AX
+        // state changing after this click (no subsequent step to unblock),
+        // so pausing here only strands the user with no recovery path.
+        // Page navigations, form submissions, and dialog dismissals all
+        // legitimately change AX state slower than the 350ms settle window.
         guard plan.steps.indices.contains(nextStepIndex) else {
-            return false
+            return true
         }
 
         switch plan.steps[nextStepIndex].type {
         case .keyboardShortcut, .pressKey, .type, .setValue, .scroll:
-            // Clicking into text or a focused control can be a valid
-            // no-op at the AX-tree level. The following key/type action
-            // is the real mutation, so don't block the flow here.
+            // Clicking into a text field or focusable control is a valid
+            // no-op at the AX-tree level — the real mutation comes from
+            // the subsequent key/type step, not the focus click.
             return true
         default:
             return false
@@ -792,6 +798,20 @@ final class WorkflowRunner: ObservableObject {
     ) async {
         guard operationToken == currentOperationToken else { return }
 
+        // When Gemini signals that the user's intent is anchored to the
+        // currently focused element, the active highlight, or the current
+        // text selection, there is no UI element to click — the right
+        // target is already in focus. Attempting a label-based click here
+        // would move focus away from where the user intends to type.
+        if let context = step.targetContext {
+            switch context {
+            case .focusedElement, .currentHighlight, .currentSelection:
+                return
+            case .visibleElement:
+                break
+            }
+        }
+
         guard let label = step.label?.trimmingCharacters(in: .whitespacesAndNewlines),
               !label.isEmpty
         else {
@@ -803,8 +823,49 @@ final class WorkflowRunner: ObservableObject {
             return
         }
 
+        // Before doing any label-based resolution, check if the currently
+        // focused AX element is already a text input. If it is, typing
+        // into it directly is correct — no click needed and no risk of
+        // the resolver picking the wrong element (AXImage, AXRadioButton,
+        // etc.) just because its label happens to contain the query word.
+        if let targetApp = targetAppForActivePlan(),
+           let focusedTextInputPoint = focusedTextInputCenter(pid: targetApp.processIdentifier) {
+            previousStepResolvedGlobalScreenPoint = focusedTextInputPoint
+            print("[Workflow] text input already focused — skipping click for \"\(label)\"")
+            return
+        }
+
+        // The focused element is not a text input. Try to find a text input
+        // field in the AX tree using box_2d proximity first (most reliable),
+        // then fall back to label matching. This avoids the common failure
+        // where the resolver matches a search icon or radio button that
+        // shares words with the query instead of the actual input field.
         let pickedCapture = latestCaptureForActivePlan
 
+        // Proximity-first: if Gemini gave us a box_2d hint, look for a text
+        // input field near that hint point in the AX tree before trying label.
+        if let hintPoint = pickedCapture.flatMap({ step.hintCoordinate(in: $0) }),
+           let targetApp = targetAppForActivePlan(),
+           let nearbyInputPoint = nearestTextInputField(
+               toScreenshotPoint: hintPoint,
+               capture: pickedCapture,
+               pid: targetApp.processIdentifier
+           ) {
+            previousStepResolvedGlobalScreenPoint = nearbyInputPoint
+            do {
+                try await ActionExecutor.shared.click(
+                    atGlobalScreenPoint: nearbyInputPoint,
+                    activatingTargetApp: targetAppForActivePlan()
+                )
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                print("[Workflow] clicked nearest text input field near hint for \"\(label)\"")
+                return
+            } catch {
+                print("[Workflow] click on nearest text input failed: \(error.localizedDescription)")
+            }
+        }
+
+        // Fall back to label-based resolution.
         let resolution = await ElementResolver.shared.resolve(
             label: label,
             llmHintInScreenshotPixels: pickedCapture.flatMap { step.hintCoordinate(in: $0) },
@@ -833,6 +894,124 @@ final class WorkflowRunner: ObservableObject {
             print("[Workflow] failed to focus text input target \"\(label)\": \(error.localizedDescription)")
         }
     }
+    // MARK: - Text Input Field Helpers
+
+    private let textInputRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
+
+    /// Returns the AppKit-coordinate center of the currently focused AX
+    /// element if it is a text input field, or nil otherwise.
+    /// Used to skip the click-to-focus step when the user already has
+    /// a text field focused — avoids the resolver picking the wrong element.
+    private func focusedTextInputCenter(pid: pid_t) -> CGPoint? {
+        let app = AXUIElementCreateApplication(pid)
+        var focusedRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
+              let focused = focusedRef else { return nil }
+        let focusedElement = focused as! AXUIElement
+
+        var roleRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(focusedElement, kAXRoleAttribute as CFString, &roleRef) == .success,
+              let role = roleRef as? String,
+              textInputRoles.contains(role) else { return nil }
+
+        var posRef: AnyObject?, sizeRef: AnyObject?
+        AXUIElementCopyAttributeValue(focusedElement, kAXPositionAttribute as CFString, &posRef)
+        AXUIElementCopyAttributeValue(focusedElement, kAXSizeAttribute as CFString, &sizeRef)
+        guard let posVal = posRef, let sizeVal = sizeRef else { return nil }
+        var pos = CGPoint.zero; var size = CGSize.zero
+        AXValueGetValue(posVal as! AXValue, .cgPoint, &pos)
+        AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
+
+        // Convert CG (top-left origin) center to AppKit (bottom-left origin).
+        let primaryHeight = NSScreen.screens.first(where: { $0.frame.origin == .zero })?.frame.height
+            ?? NSScreen.main?.frame.height ?? 0
+        let centerCGY = pos.y + size.height / 2
+        let centerAppKitY = primaryHeight - centerCGY
+        return CGPoint(x: pos.x + size.width / 2, y: centerAppKitY)
+    }
+
+    /// Walk the AX tree of `pid` and return the AppKit-coordinate center of
+    /// the text input field whose CG-space center is closest to `screenshotPoint`
+    /// (screenshot pixel coordinates relative to `capture`).
+    /// Returns nil if no text input fields are found.
+    private func nearestTextInputField(
+        toScreenshotPoint screenshotPoint: CGPoint,
+        capture: CompanionScreenCapture?,
+        pid: pid_t
+    ) -> CGPoint? {
+        let app = AXUIElementCreateApplication(pid)
+        var windowsRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let windows = windowsRef as? [AXUIElement] else { return nil }
+
+        let primaryHeight = NSScreen.screens.first(where: { $0.frame.origin == .zero })?.frame.height
+            ?? NSScreen.main?.frame.height ?? 0
+
+        // Convert the screenshot pixel hint to a CG global coordinate so we
+        // can compare directly against AX-reported element positions.
+        // AX uses CG space (top-left origin). The capture's displayFrame is
+        // in AppKit space (bottom-left origin), so convert it to CG first.
+        var hintCGPoint: CGPoint?
+        if let capture {
+            let scaleX = CGFloat(capture.displayWidthInPoints) / CGFloat(capture.screenshotWidthInPixels)
+            let scaleY = CGFloat(capture.displayHeightInPoints) / CGFloat(capture.screenshotHeightInPixels)
+            // displayFrame.origin is AppKit (bottom-left). Convert to CG top-left:
+            // CG_originY = primaryHeight - appKit_originY - displayHeightInPoints
+            let cgOriginX = capture.displayFrame.origin.x
+            let cgOriginY = primaryHeight - capture.displayFrame.origin.y - CGFloat(capture.displayHeightInPoints)
+            hintCGPoint = CGPoint(
+                x: cgOriginX + screenshotPoint.x * scaleX,
+                y: cgOriginY + screenshotPoint.y * scaleY
+            )
+        }
+
+        var bestPoint: CGPoint?
+        var bestDistance: CGFloat = .greatestFiniteMagnitude
+
+        func walk(_ element: AXUIElement, depth: Int) {
+            guard depth < 12 else { return }
+
+            var roleRef: AnyObject?
+            AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
+            let role = roleRef as? String ?? ""
+
+            if textInputRoles.contains(role) {
+                var posRef: AnyObject?, sizeRef: AnyObject?
+                AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posRef)
+                AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef)
+                if let posVal = posRef, let sizeVal = sizeRef {
+                    var pos = CGPoint.zero; var sz = CGSize.zero
+                    AXValueGetValue(posVal as! AXValue, .cgPoint, &pos)
+                    AXValueGetValue(sizeVal as! AXValue, .cgSize, &sz)
+                    if sz.width > 10, sz.height > 10 {
+                        let centerCG = CGPoint(x: pos.x + sz.width / 2, y: pos.y + sz.height / 2)
+                        let dist: CGFloat
+                        if let hint = hintCGPoint {
+                            let dx = centerCG.x - hint.x; let dy = centerCG.y - hint.y
+                            dist = sqrt(dx * dx + dy * dy)
+                        } else {
+                            dist = 0
+                        }
+                        if dist < bestDistance {
+                            bestDistance = dist
+                            let appKitY = primaryHeight - centerCG.y
+                            bestPoint = CGPoint(x: centerCG.x, y: appKitY)
+                        }
+                    }
+                }
+            }
+
+            var childrenRef: AnyObject?
+            AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef)
+            if let children = childrenRef as? [AXUIElement] {
+                for child in children { walk(child, depth: depth + 1) }
+            }
+        }
+
+        for window in windows { walk(window, depth: 0) }
+        return bestPoint
+    }
+
     // MARK: - Non-Click Step Executors (Autopilot Only)
 
     private func executeOpenApplicationStep(
@@ -963,13 +1142,22 @@ final class WorkflowRunner: ObservableObject {
             return
         }
 
-        let textToType = step.value ?? step.label
+        let rawText = step.value ?? step.label
 
-        guard let textToType, !textToType.isEmpty else {
+        guard let rawText, !rawText.isEmpty else {
             print("[Workflow] type step has no text — skipping")
             advanceUsingCachedHandlers(isPostClick: false)
             return
         }
+
+        // Gemini sometimes appends "\n" to the value as a shorthand for
+        // "type this then submit". Strip it from the text and press Return
+        // as a separate key event so the input field receives a proper
+        // keyboard Return rather than a literal newline character.
+        let endsWithNewline = rawText.hasSuffix("\n")
+        let textToType = endsWithNewline
+            ? String(rawText.dropLast())
+            : rawText
 
         do {
             await focusTargetForTextInputIfNeeded(
@@ -979,12 +1167,22 @@ final class WorkflowRunner: ObservableObject {
 
             guard operationToken == currentOperationToken else { return }
 
-            try await ActionExecutor.shared.typeText(
-                textToType,
-                activatingTargetApp: targetAppForActivePlan()
-            )
+            if !textToType.isEmpty {
+                try await ActionExecutor.shared.typeText(
+                    textToType,
+                    activatingTargetApp: targetAppForActivePlan()
+                )
+                guard operationToken == currentOperationToken else { return }
+            }
 
-            guard operationToken == currentOperationToken else { return }
+            if endsWithNewline {
+                try await ActionExecutor.shared.pressKey(
+                    "Return",
+                    activatingTargetApp: targetAppForActivePlan()
+                )
+                guard operationToken == currentOperationToken else { return }
+                print("[Workflow] pressed Return after type (\\n in value)")
+            }
 
             advanceUsingCachedHandlers(isPostClick: false)
         } catch {

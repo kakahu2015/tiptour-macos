@@ -1,6 +1,6 @@
 //
 //  CompanionPanelView.swift
-//  TipTour
+//  PointPilot
 //
 //  SwiftUI content hosted inside the menu bar panel. Minimal layout:
 //  status header, permissions setup or hotkey hint, optional workflow
@@ -58,8 +58,6 @@ struct CompanionPanelView: View {
                 autopilotToggleRow
                     .padding(.horizontal, 16)
                 Spacer().frame(height: 6)
-                nekoModeToggleRow
-                    .padding(.horizontal, 16)
             }
 
             Spacer().frame(height: 12)
@@ -86,7 +84,7 @@ struct CompanionPanelView: View {
                     .frame(width: 8, height: 8)
                     .shadow(color: statusDotColor.opacity(0.6), radius: 4)
 
-                Text("TipTour")
+                Text("Pointera")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(DS.Colors.textPrimary)
             }
@@ -155,12 +153,17 @@ struct CompanionPanelView: View {
     @ViewBuilder
     private var permissionsCopySection: some View {
         if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
-            Text("Hold Control + Option to talk.")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(DS.Colors.textSecondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Hold Control + Option to talk.")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+                Text("Hold Control + Shift + scroll to select an area.")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         } else if companionManager.allPermissionsGranted {
-            Text("You're all set. Hit Start to meet TipTour.")
+            Text("You're all set. Hit Start to meet Pointera.")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(DS.Colors.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -170,7 +173,7 @@ struct CompanionPanelView: View {
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(DS.Colors.textSecondary)
 
-                Text("Some permissions were revoked. Grant the four below to keep using TipTour.")
+                Text("Some permissions were revoked. Grant the four below to keep using Pointera.")
                     .font(.system(size: 11))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -178,7 +181,7 @@ struct CompanionPanelView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Hi, I'm TipTour.")
+                Text("Hi, I'm Pointera.")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(DS.Colors.textSecondary)
 
@@ -444,16 +447,15 @@ struct CompanionPanelView: View {
 
     // MARK: - Autopilot Toggle
 
-    /// Promotes TipTour from teaching ("show me how") to autopilot
+    /// Promotes PointPilot from teaching ("show me how") to autopilot
     /// ("do it for me"). When ON, the cursor flies to each resolved
-    /// element and TipTour clicks it for the user; workflow plans
+    /// element and PointPilot clicks it for the user; workflow plans
     /// drive themselves end-to-end (including keyboard shortcuts and
-    /// text typing). When OFF, TipTour only points and the
+    /// text typing). When OFF, PointPilot only points and the
     /// user clicks themselves.
     ///
-    /// We give this prominence in the panel — same row weight as Neko
-    /// — because it's a real change in behavior the user should be
-    /// aware of every time they open the panel.
+    /// We give this prominence in the panel because it's a real change
+    /// in behavior the user should be aware of every time they open the panel.
     private var autopilotToggleRow: some View {
         HStack {
             HStack(spacing: 8) {
@@ -474,8 +476,8 @@ struct CompanionPanelView: View {
                         .foregroundColor(DS.Colors.textSecondary)
                     Text(
                         companionManager.isAutopilotEnabled
-                            ? "TipTour clicks for you"
-                            : "TipTour only points; you click"
+                            ? "Pointera clicks for you"
+                            : "Pointera only points; you click"
                     )
                     .font(.system(size: 10))
                     .foregroundColor(DS.Colors.textTertiary)
@@ -487,46 +489,6 @@ struct CompanionPanelView: View {
             Toggle("", isOn: Binding(
                 get: { companionManager.isAutopilotEnabled },
                 set: { companionManager.setAutopilotEnabled($0) }
-            ))
-            .toggleStyle(.switch)
-            .labelsHidden()
-            .tint(DS.Colors.accent)
-            .scaleEffect(0.8)
-        }
-        .padding(.vertical, 4)
-    }
-
-    // MARK: - Neko Mode Toggle
-
-    /// Whimsical toggle that swaps the blue triangle cursor for a
-    /// pixel-art cat (classic oneko sprites).
-    private var nekoModeToggleRow: some View {
-        HStack {
-            HStack(spacing: 8) {
-                Image(systemName: "cat.fill")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(
-                        companionManager.isNekoModeEnabled
-                            ? DS.Colors.accent
-                            : DS.Colors.textTertiary
-                    )
-                    .frame(width: 16)
-
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Neko mode")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(DS.Colors.textSecondary)
-                    Text("replace cursor with a pixel cat")
-                        .font(.system(size: 10))
-                        .foregroundColor(DS.Colors.textTertiary)
-                }
-            }
-
-            Spacer()
-
-            Toggle("", isOn: Binding(
-                get: { companionManager.isNekoModeEnabled },
-                set: { companionManager.setNekoModeEnabled($0) }
             ))
             .toggleStyle(.switch)
             .labelsHidden()
@@ -800,81 +762,29 @@ struct CompanionPanelView: View {
 
     // MARK: - Footer
 
-    private var feedbackButton: some View {
-        Button(action: {
-            if let url = URL(string: "https://x.com/milindlabs") {
-                NSWorkspace.shared.open(url)
-            }
-        }) {
-            HStack(spacing: 5) {
-                Image(systemName: "bubble.left")
-                    .font(.system(size: 10))
-                Text("Feedback")
-                    .font(.system(size: 11))
-            }
-            .foregroundColor(DS.Colors.textTertiary)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .pointerCursor()
-    }
-
     private var footerSection: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                feedbackButton
+            Divider()
+                .background(Color.white.opacity(0.06))
 
-                // Always-visible Dev button — gives shipped users access to
-                // the voice-backend picker and BYOK key inputs. The truly
-                // debug-only rows (Detection Overlay, Test Cursor Flight,
-                // Reset All) stay #if DEBUG-gated inside the section.
-                footerButton("Dev", systemImage: "wrench", toggled: showDevTools) {
-                    showDevTools.toggle()
+            Button(action: { NSApp.terminate(nil) }) {
+                HStack(spacing: 5) {
+                    Image(systemName: "power")
+                        .font(.system(size: 10))
+                    Text("Quit")
+                        .font(.system(size: 11))
                 }
-
-                Spacer()
-
-                footerButton("Quit", systemImage: "power") {
-                    NSApp.terminate(nil)
-                }
+                .foregroundColor(DS.Colors.textTertiary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
             }
-
-            if showDevTools {
-                devToolsSection
-                    .padding(.top, 8)
-            }
+            .buttonStyle(.plain)
+            .pointerCursor()
         }
-    }
-
-    private func footerButton(
-        _ title: String,
-        systemImage: String,
-        toggled: Bool = false,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 10))
-                Text(title)
-                    .font(.system(size: 11))
-            }
-            .foregroundColor(toggled ? DS.Colors.textSecondary : DS.Colors.textTertiary)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .pointerCursor()
     }
 
     // MARK: - Dev Tools
-
-    /// Internal debug rows. The Gemini key entry is intentionally exposed
-    /// in the normal panel setup instead of being hidden here.
-    @State private var showDevTools: Bool = false
 
     /// One-line bring-your-own-key row. Icon + label on the left, a
     /// SecureField that grows to fill, and a single trailing icon button
@@ -956,83 +866,6 @@ struct CompanionPanelView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
-    }
-
-    private var devToolsSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            #if DEBUG
-            sectionHeader("DEBUG")
-
-            devToolRow("Test Cursor Flight", systemImage: "arrow.up.right") {
-                let s = NSScreen.main!
-                companionManager.detectedElementScreenLocation = CGPoint(x: s.frame.midX, y: s.frame.midY)
-                companionManager.detectedElementDisplayFrame = s.frame
-                companionManager.detectedElementBubbleText = "Test"
-                NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
-            }
-
-            Spacer().frame(height: 6)
-            #endif
-
-        }
-        .padding(.vertical, 4)
-    }
-
-    /// Compact uppercase section label used inside the Dev panel.
-    private func sectionHeader(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 9, weight: .semibold, design: .rounded))
-            .tracking(0.4)
-            .foregroundColor(DS.Colors.textTertiary)
-            .padding(.horizontal, 10)
-            .padding(.top, 6)
-            .padding(.bottom, 3)
-    }
-
-    private func devToolRow(
-        _ title: String,
-        systemImage: String,
-        destructive: Bool = false,
-        action: @escaping () -> Void,
-        @ViewBuilder trailing: () -> some View = { EmptyView() }
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 11))
-                    .foregroundColor(destructive ? .red.opacity(0.7) : DS.Colors.textTertiary)
-                    .frame(width: 16)
-
-                Text(title)
-                    .font(.system(size: 12))
-                    .foregroundColor(destructive ? .red.opacity(0.7) : DS.Colors.textSecondary)
-
-                Spacer()
-
-                trailing()
-                    .font(.system(size: 11))
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(DevToolRowButtonStyle())
-        .pointerCursor()
-    }
-
-    private struct DevToolRowButtonStyle: ButtonStyle {
-        @State private var isHovered = false
-
-        func makeBody(configuration: Configuration) -> some View {
-            configuration.label
-                .background(
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(configuration.isPressed
-                              ? DS.Colors.surface4
-                              : isHovered ? DS.Colors.surface3 : Color.clear)
-                )
-                .onHover { isHovered = $0 }
-        }
     }
 
     // MARK: - Visuals

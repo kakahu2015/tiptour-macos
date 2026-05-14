@@ -1,6 +1,6 @@
 //
 //  CompanionManager.swift
-//  TipTour
+//  PointPilot
 //
 //  Central state manager for the Gemini Live voice companion. Owns the
 //  push-to-talk hotkey, screen capture, Gemini Live session, tool handlers
@@ -64,7 +64,7 @@ final class CompanionManager: ObservableObject {
     /// builds intentionally do not hardcode the maintainer's Worker URL;
     /// builders should paste their own Gemini key in the panel instead.
     private static let workerBaseURL: String? = {
-        let url = AppBundleConfiguration.stringValue(forKey: "TipTourWorkerBaseURL")
+        let url = AppBundleConfiguration.stringValue(forKey: "PointPilotWorkerBaseURL")
         ElementResolver.workerBaseURLOverride = url
         return url
     }()
@@ -331,8 +331,23 @@ final class CompanionManager: ObservableObject {
     /// raw tool args into a WorkflowPlan and kicks off the runner.
     @MainActor
     private func handleToolSubmitWorkflowPlan(id: String, goal: String, app: String, steps: [[String: Any]]) async -> [String: Any] {
-        if let rejection = rejectIfToolCallShouldNotRun(id: id, toolName: "submit_workflow_plan") {
-            return rejection
+        // If the current workflow is paused (e.g. post-click validator decided
+        // the click missed, or a modal appeared), allow Gemini to submit a
+        // corrected plan even within the same utterance — the pause means
+        // the previous plan stalled and Gemini is self-correcting. Skip the
+        // per-utterance dedup check in this case.
+        let workflowIsPaused = WorkflowRunner.shared.pausedReason != nil
+        if !workflowIsPaused {
+            if let rejection = rejectIfToolCallShouldNotRun(id: id, toolName: "submit_workflow_plan") {
+                return rejection
+            }
+        } else {
+            // Still register the id so duplicate detection works within
+            // the corrected-plan scope.
+            handledToolCallIDsThisUtterance.insert(id)
+            acceptedToolCallIDThisUtterance = id
+            print("[Tool] 🔄 workflow paused — allowing corrected plan from Gemini (id=\(id))")
+            WorkflowRunner.shared.stop()
         }
 
         if let activePlan = WorkflowRunner.shared.activePlan {
@@ -401,8 +416,8 @@ final class CompanionManager: ObservableObject {
             voiceBackend.invalidateScreenshotHashCache()
             return [
                 "ok": false,
-                "reason": "tour_guide_disabled",
-                "message": "The step-by-step teaching tour guide is disabled. If the user wants action-taking, ask them to turn Autopilot on; otherwise answer conversationally without submitting a workflow plan."
+                "reason": "autopilot_disabled",
+                "message": "Autopilot is OFF. Do NOT retry this tool call — retrying will be rejected again. Instead, answer the user's question conversationally without calling any tool. If the user wants PointPilot to take actions, tell them to turn Autopilot on in the Pointera panel."
             ]
         }
 
@@ -429,7 +444,8 @@ final class CompanionManager: ObservableObject {
         return [
             "ok": true,
             "accepted_steps": stepLabels.count,
-            "tour_guide_enabled": isMultiStepTourGuideEnabled
+            "tour_guide_enabled": isMultiStepTourGuideEnabled,
+            "message": "Plan accepted and executing now on the user's machine. All \(stepLabels.count) step(s) will run automatically. Do NOT re-submit this plan or a similar one — the actions are already in progress. Screenshots may be temporarily suppressed while steps execute; an unchanged screen does NOT mean failure. Narrate what you just did and wait for the user to speak again."
         ]
     }
 
@@ -516,24 +532,12 @@ final class CompanionManager: ObservableObject {
         NotificationCenter.default.post(name: .tipTourPanelPinStateChanged, object: nil)
     }
 
-    /// Neko mode: replace the blue triangle cursor with a pixel-art cat
-    /// (classic oneko sprites). Defaults OFF so the standard cursor
-    /// remains the primary action-taking visual on new installs.
-    @Published var isNekoModeEnabled: Bool = UserDefaults.standard.object(forKey: "isNekoModeEnabled") == nil
-        ? false
-        : UserDefaults.standard.bool(forKey: "isNekoModeEnabled")
-
-    func setNekoModeEnabled(_ enabled: Bool) {
-        isNekoModeEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "isNekoModeEnabled")
-    }
-
-    /// Autopilot mode: when enabled, TipTour CLICKS the resolved
+    /// Autopilot mode: when enabled, PointPilot CLICKS the resolved
     /// element instead of waiting for the user to click it. Single
     /// workflow plans drive themselves end-to-end. Actions must use a
     /// CUA workflow plan so they are token-gated and app-scoped.
     ///
-    /// Defaults ON so TipTour can take actions by default. Persisted
+    /// Defaults ON so PointPilot can take actions by default. Persisted
     /// per-user so people can still switch back to teaching mode and
     /// keep that preference.
     ///
@@ -596,7 +600,7 @@ final class CompanionManager: ObservableObject {
     func triggerOnboarding() {
         NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
         hasCompletedOnboarding = true
-        TipTourAnalytics.trackOnboardingStarted()
+        PointPilotAnalytics.trackOnboardingStarted()
         overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
         isOverlayVisible = true
     }
@@ -639,7 +643,7 @@ final class CompanionManager: ObservableObject {
 
     func start() {
         refreshAllPermissions()
-        print("🔑 TipTour start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
+        print("🔑 PointPilot start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
 
         // Cap how long any AX query can hang waiting for a target app's
@@ -728,13 +732,13 @@ final class CompanionManager: ObservableObject {
         }
 
         if !previouslyHadAccessibility && hasAccessibilityPermission {
-            TipTourAnalytics.trackPermissionGranted(permission: "accessibility")
+            PointPilotAnalytics.trackPermissionGranted(permission: "accessibility")
         }
         if !previouslyHadScreenRecording && hasScreenRecordingPermission {
-            TipTourAnalytics.trackPermissionGranted(permission: "screen_recording")
+            PointPilotAnalytics.trackPermissionGranted(permission: "screen_recording")
         }
         if !previouslyHadMicrophone && hasMicrophonePermission {
-            TipTourAnalytics.trackPermissionGranted(permission: "microphone")
+            PointPilotAnalytics.trackPermissionGranted(permission: "microphone")
         }
         // Screen content permission is persisted — once approved it sticks.
         if !hasScreenContentPermission {
@@ -742,7 +746,7 @@ final class CompanionManager: ObservableObject {
         }
 
         if !previouslyHadAll && allPermissionsGranted {
-            TipTourAnalytics.trackAllPermissionsGranted()
+            PointPilotAnalytics.trackAllPermissionsGranted()
         }
     }
 
@@ -770,7 +774,7 @@ final class CompanionManager: ObservableObject {
                     guard didCapture else { return }
                     hasScreenContentPermission = true
                     UserDefaults.standard.set(true, forKey: "hasScreenContentPermission")
-                    TipTourAnalytics.trackPermissionGranted(permission: "screen_content")
+                    PointPilotAnalytics.trackPermissionGranted(permission: "screen_content")
 
                     if hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible {
                         overlayWindowManager.hasShownOverlayBefore = true
@@ -814,7 +818,7 @@ final class CompanionManager: ObservableObject {
     }
 
     /// Watch NSWorkspace for app-activation events and continuously remember
-    /// the last NON-TipTour app the user activated. This is the
+    /// the last NON-PointPilot app the user activated. This is the
     /// `userTargetAppOverride` the AX resolver uses to route queries at
     /// the right app.
     private func beginTrackingUserTargetApp() {
@@ -891,7 +895,7 @@ final class CompanionManager: ObservableObject {
         switch transition {
         case .pressed:
             // Snapshot the user's real frontmost app BEFORE opening the
-            // menu bar panel or cursor overlay. Once TipTour shows any UI
+            // menu bar panel or cursor overlay. Once PointPilot shows any UI
             // macOS may flip frontmost to us, so this is the only reliable
             // moment to capture which app the user was actually looking at.
             let hoverWindowContext = Self.windowContext(at: NSEvent.mouseLocation)
@@ -915,7 +919,7 @@ final class CompanionManager: ObservableObject {
             onboardingPromptText = ""
             onboardingPromptOpacity = 0.0
 
-            TipTourAnalytics.trackPushToTalkStarted()
+            PointPilotAnalytics.trackPushToTalkStarted()
 
             // Gemini Live uses TOGGLE behavior — press once to start, press
             // again to end. On close we suspend (WebSocket stays alive);
@@ -932,7 +936,7 @@ final class CompanionManager: ObservableObject {
             }
         case .released:
             // Release is a no-op — the session is toggled by hotkey PRESS.
-            TipTourAnalytics.trackPushToTalkReleased()
+            PointPilotAnalytics.trackPushToTalkReleased()
         case .none:
             break
         }
@@ -1523,7 +1527,7 @@ final class CompanionManager: ObservableObject {
 
     private static var companionVoiceResponseSystemPrompt: String {
         """
-    you're tiptour, a friendly always-on companion that lives in the user's menu bar. you can see the user's screen(s) at all times via streaming screenshots, and you can hear them when they speak. your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
+    you're pointpilot, a friendly always-on companion that lives in the user's menu bar. you can see the user's screen(s) at all times via streaming screenshots, and you can hear them when they speak. your reply will be spoken aloud via text-to-speech, so write the way you'd actually talk. this is an ongoing conversation — you remember everything they've said before.
 
     SILENCE-AT-CONNECT RULE (CRITICAL — read every time):
     when a session begins, you are silent. you wait. do NOT greet the user. do NOT say "hi" / "hello" / "i see you have X" / "how can i help". do NOT comment on what's on screen. do NOT narrate anything you see in incoming screenshots. screenshots arriving on their own are NOT a prompt to speak — they're just visual context for when the user eventually does speak. the very first thing you say in this session must be a direct response to the user's actual VOICE — words you heard them speak through the microphone. background noise, breathing, mouse clicks, keyboard taps, room sound, music, or ambient audio are NOT user input — ignore them and stay silent. if the input transcript is empty or contains only non-speech sounds, you stay silent. never speak first.
@@ -1619,17 +1623,22 @@ final class CompanionManager: ObservableObject {
         use when no modifiers are involved.
 
       type: "type"
-        value = the literal text to type. label = the target input field name visible on screen (e.g. "Search", "Address and search bar", "Note body", "Message", "To"). ALWAYS set label to the field name — TipTour uses it to click and focus the field before typing. If you cannot see a label, set label to the nearest visible placeholder or field role. NEVER leave label empty on a type step.
+        value = the literal text to type. label = the target input field name visible on screen (e.g. "Search", "Address and search bar", "Note body", "Message", "To").
+        PointPilot uses label to click and focus the field before typing. Choose label as follows:
+          • if the user pointed at a specific named field you can see → set label to its visible name and omit targetContext.
+          • if the user said "here", "this area", "this box", "this field", or didn't name a field → set targetContext:"focusedElement" and set label to any nearby visible field name or placeholder (it is used only as a fallback hint, not for clicking). PointPilot will type directly into whatever element already has focus.
+          • if the user said to rewrite/change/replace the highlighted area → set targetContext:"currentHighlight" and type ONLY the replacement text in value.
+          • if the user refers to their current native text selection → set targetContext:"currentSelection".
+        NEVER leave label empty on a type step — use the nearest visible placeholder or role as label even when targetContext is set.
         ONLY use after a step has focused a text field (clicking it, or a Cmd+N that opens a fresh field). NEVER chain two `type` steps — concatenate the text into one step instead.
         do NOT translate the text. if the user said "type 'on my way'", the value is exactly `on my way`, not the user's spoken language.
-        if the user said to rewrite/change/delete/replace the current highlighted area, include targetContext:"currentHighlight" and type ONLY the replacement text in value.
         for writing a title plus body, put the entire text in ONE type step's value with newline characters between title and paragraphs.
 
       type: "setValue"
         value = the value to set on the currently focused native AX element. use sparingly; prefer `type` for normal text fields.
 
       targetContext:
-        optional grounding field for any step. use targetContext:"currentHighlight" when the user refers to the painted highlight or "this highlighted part"; targetContext:"currentSelection" for a normal selected text range; targetContext:"focusedElement" for the active field; targetContext:"visibleElement" for ordinary screen labels. targetContext tells TipTour what app/window/element/range to bind the action to, so it is safer than clicking before typing.
+        optional grounding field for any step. use targetContext:"currentHighlight" ONLY when the user explicitly painted a freeform highlight (Ctrl+Shift); use targetContext:"currentSelection" for a normal native text selection; use targetContext:"focusedElement" when the user says "here", "this field", "this box", or points at a field without naming it; use targetContext:"visibleElement" for ordinary named on-screen elements. do NOT use "currentHighlight" for regular text fields — only use it when the user actually painted a highlight stroke.
 
       type: "scroll"
         direction = "up" | "down" | "left" | "right"; amount = small integer; by = "line" or "page".
@@ -1719,15 +1728,30 @@ final class CompanionManager: ObservableObject {
     }
 
     private static var multiStepTourGuidePromptRule: String {
-        let isEnabled = UserDefaults.standard.object(forKey: "isMultiStepTourGuideEnabled") == nil
+        let isTourGuideEnabled = UserDefaults.standard.object(forKey: "isMultiStepTourGuideEnabled") == nil
             ? false
             : UserDefaults.standard.bool(forKey: "isMultiStepTourGuideEnabled")
 
-        if isEnabled {
+        let isAutopilotOn = UserDefaults.standard.object(forKey: "isAutopilotEnabled") == nil
+            ? true
+            : UserDefaults.standard.bool(forKey: "isAutopilotEnabled")
+
+        if !isAutopilotOn && !isTourGuideEnabled {
+            // Both action modes are off — Gemini must never call the tool.
+            // Any submit_workflow_plan call will be rejected by the app, so
+            // tell Gemini up front to avoid the retry loop.
+            return """
+            AUTOPILOT MODE: OFF. TOUR GUIDE MODE: OFF.
+            submit_workflow_plan is DISABLED. do NOT call it under any circumstances — every call will be rejected with ok:false and you must not retry. \
+            answer all requests conversationally. if the user asks you to perform a computer action, tell them Autopilot is off and they can turn it on in the Pointera panel.
+            """
+        }
+
+        if isTourGuideEnabled {
             return "MULTI-STEP TOUR GUIDE MODE: enabled. you may use submit_workflow_plan for teaching-style walkthroughs when the user asks \"how do i\", \"show me\", \"walk me through\", or \"teach me\"."
         }
 
-        return "MULTI-STEP TOUR GUIDE MODE: disabled. do not use submit_workflow_plan for teaching-style walkthroughs where the user is supposed to click step by step. use submit_workflow_plan only when TipTour should actually perform actions in Autopilot. if the user asks \"how do i\", \"show me\", \"walk me through\", or \"teach me\", answer conversationally or point at one visible element instead of creating a guided tour."
+        return "MULTI-STEP TOUR GUIDE MODE: disabled. do not use submit_workflow_plan for teaching-style walkthroughs where the user is supposed to click step by step. use submit_workflow_plan only when Pointera should actually perform actions in Autopilot. if the user asks \"how do i\", \"show me\", \"walk me through\", or \"teach me\", answer conversationally or point at one visible element instead of creating a guided tour."
     }
 
     // MARK: - Image Conversion

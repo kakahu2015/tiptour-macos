@@ -1,6 +1,6 @@
 //
-//  TipTourApp.swift
-//  TipTour
+//  PointPilotApp.swift
+//  PointPilot
 //
 //  Menu bar-only companion app. No dock icon, no main window — just an
 //  always-available status item in the macOS menu bar. Clicking the icon
@@ -12,7 +12,7 @@ import SwiftUI
 import Sparkle
 
 @main
-struct TipTourApp: App {
+struct PointPilotApp: App {
     @NSApplicationDelegateAdaptor(CompanionAppDelegate.self) var appDelegate
 
     var body: some Scene {
@@ -34,13 +34,13 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var sparkleUpdaterController: SPUStandardUpdaterController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        print("🎯 TipTour: Starting...")
-        print("🎯 TipTour: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
+        print("🎯 PointPilot: Starting...")
+        print("🎯 PointPilot: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
 
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 0])
 
-        TipTourAnalytics.configure()
-        TipTourAnalytics.trackAppOpened()
+        PointPilotAnalytics.configure()
+        PointPilotAnalytics.trackAppOpened()
 
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
         companionManager.start()
@@ -69,9 +69,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         if loginItemService.status != .enabled {
             do {
                 try loginItemService.register()
-                print("🎯 TipTour: Registered as login item")
+                print("🎯 PointPilot: Registered as login item")
             } catch {
-                print("⚠️ TipTour: Failed to register as login item: \(error)")
+                print("⚠️ PointPilot: Failed to register as login item: \(error)")
             }
         }
     }
@@ -85,7 +85,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         let hasFeedURL = (infoDict?["SUFeedURL"] as? String)?.isEmpty == false
         let hasPublicKey = (infoDict?["SUPublicEDKey"] as? String)?.isEmpty == false
         guard hasFeedURL && hasPublicKey else {
-            print("⚠️ TipTour: Sparkle updater skipped — SUFeedURL or SUPublicEDKey not set in Info.plist (this is fine for local debug builds)")
+            print("⚠️ PointPilot: Sparkle updater skipped — SUFeedURL or SUPublicEDKey not set in Info.plist (this is fine for local debug builds)")
             return
         }
 
@@ -98,9 +98,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             try updaterController.updater.start()
-            print("🎯 TipTour: Sparkle updater started")
+            print("🎯 PointPilot: Sparkle updater started")
         } catch {
-            print("⚠️ TipTour: Sparkle updater failed to start: \(error)")
+            print("⚠️ PointPilot: Sparkle updater failed to start: \(error)")
         }
     }
 }

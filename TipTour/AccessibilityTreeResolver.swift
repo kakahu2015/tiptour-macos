@@ -202,6 +202,91 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
         marks.map { "[\($0.role):\($0.label)]" }.joined(separator: " ")
     }
 
+    /// Find the smallest pointable AX element whose frame contains the given
+    /// global AppKit screen point. Used by ElementResolver when Gemini supplies
+    /// box_2d: we trust Gemini's spatial coordinate but snap to the exact
+    /// element center/rect so the click is pixel-perfect and the click detector
+    /// gets a real hit region.
+    ///
+    /// "Smallest" = minimum area among all candidates whose frames contain the
+    /// point — this selects the leaf element (a button, link, field) over its
+    /// parent containers (scroll view, web area) that also cover the same point.
+    ///
+    /// Returns nil when:
+    ///   - AX permission not granted
+    ///   - No running app can be identified
+    ///   - No pointable element's frame contains the point within the deadline
+    func findElementContainingPoint(_ globalPoint: CGPoint, targetAppHint: String?) -> ResolvedElement? {
+        guard Self.isPermissionGranted else { return nil }
+
+        let (targetApp, targetBundleID) = resolveTargetApp(hint: targetAppHint)
+        guard let targetApp else { return nil }
+
+        AXUIElementSetMessagingTimeout(targetApp, 0.15)
+
+        // Convert the global AppKit point (bottom-left origin) to CG screen
+        // coordinates (top-left origin) to compare against AX element frames,
+        // which are in CG space.
+        let primaryScreen = NSScreen.screens.first(where: { $0.frame.origin == .zero })
+            ?? NSScreen.main ?? NSScreen.screens.first
+        guard let primaryScreen else { return nil }
+        let cgPoint = CGPoint(x: globalPoint.x, y: primaryScreen.frame.height - globalPoint.y)
+
+        var bestElement: ResolvedElement? = nil
+        var bestArea: CGFloat = .greatestFiniteMagnitude
+        let deadline = Date().addingTimeInterval(0.3)
+
+        func walk(_ node: AXUIElement, depth: Int) {
+            guard depth < 12, Date() < deadline else { return }
+
+            guard let attrs = batchReadNodeAttributes(node) else {
+                recurseChildren(node, depth: depth)
+                return
+            }
+
+            // Only consider visible pointable roles — skip layout containers.
+            if Self.pointableRoles.contains(attrs.role),
+               let cgFrame = attrs.frame,
+               cgFrame.contains(cgPoint),
+               cgFrame.width > 0, cgFrame.height > 0,
+               cgFrame.width <= 800, cgFrame.height <= 800,
+               boolAttribute(node, attribute: kAXEnabledAttribute) != false {
+                let area = cgFrame.width * cgFrame.height
+                if area < bestArea {
+                    let screenFrame = cgToAppKitFrame(cgFrame)
+                    let matchedText = !attrs.title.isEmpty ? attrs.title
+                        : (!attrs.description.isEmpty ? attrs.description : attrs.value)
+                    bestElement = ResolvedElement(
+                        screenFrame: screenFrame,
+                        role: attrs.role,
+                        title: matchedText,
+                        appBundleID: targetBundleID
+                    )
+                    bestArea = area
+                }
+            }
+
+            recurseChildren(node, depth: depth)
+        }
+
+        func recurseChildren(_ node: AXUIElement, depth: Int) {
+            var childrenRef: AnyObject?
+            guard AXUIElementCopyAttributeValue(node, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+                  let children = childrenRef as? [AXUIElement] else { return }
+            for child in children {
+                guard Date() < deadline else { return }
+                walk(child, depth: depth + 1)
+            }
+        }
+
+        walk(targetApp, depth: 0)
+        if let menuBar = menuBar(of: targetApp) {
+            walk(menuBar, depth: 0)
+        }
+
+        return bestElement
+    }
+
     /// Find the best matching element by title in the frontmost app's AX tree.
     /// Returns nil if the app has no AX tree (Blender-like), or no element matches.
     ///

@@ -1,6 +1,6 @@
 //
-//  TipTourAnalytics.swift
-//  TipTour
+//  PointPilotAnalytics.swift
+//  PointPilot
 //
 //  Centralized PostHog analytics wrapper. All event names and properties
 //  are defined here so instrumentation is consistent and easy to audit.
@@ -9,7 +9,7 @@
 import Foundation
 import PostHog
 
-enum TipTourAnalytics {
+enum PointPilotAnalytics {
 
     // MARK: - Setup
 

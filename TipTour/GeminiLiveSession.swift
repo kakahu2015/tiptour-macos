@@ -1,6 +1,6 @@
 //
 //  GeminiLiveSession.swift
-//  TipTour
+//  PointPilot
 //
 //  Orchestrates a full Gemini Live conversation session:
 //    1. Opens a WebSocket to Gemini via GeminiLiveClient
@@ -208,7 +208,7 @@ final class GeminiLiveSession: ObservableObject {
 
         // Fresh session = fresh visual context. Drop any cached hashes
         // from a previous session so the very first frame is always sent
-        // (otherwise restarting TipTour on the same unchanged screen would
+        // (otherwise restarting PointPilot on the same unchanged screen would
         // suppress the initial screenshot Gemini needs to see).
         lastSentScreenshotHashByScreenLabel.removeAll()
 
@@ -623,7 +623,7 @@ final class GeminiLiveSession: ObservableObject {
     // MARK: - API Key Fetch
 
     /// Resolve the Gemini API key. Source builds use only the user's
-    /// Keychain key. Distributed builds may provide TipTourWorkerBaseURL
+    /// Keychain key. Distributed builds may provide PointPilotWorkerBaseURL
     /// in Info.plist to enable a Worker fallback.
     private func fetchAPIKey() async throws -> String {
         if let userKey = KeychainStore.geminiAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -637,7 +637,7 @@ final class GeminiLiveSession: ObservableObject {
                 domain: "GeminiLiveSession",
                 code: -9,
                 userInfo: [
-                    NSLocalizedDescriptionKey: "No Gemini API key saved. Paste your own Gemini API key in the TipTour panel to use this source build."
+                    NSLocalizedDescriptionKey: "No Gemini API key saved. Paste your own Gemini API key in the Pointera panel to use this source build."
                 ]
             )
         }
@@ -655,7 +655,7 @@ final class GeminiLiveSession: ObservableObject {
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
             throw NSError(domain: "GeminiLiveSession", code: -10,
-                          userInfo: [NSLocalizedDescriptionKey: "Failed to fetch Gemini API key from Worker (\(apiKeyURL.absoluteString)). Paste a key in the TipTour panel or check the Worker configuration."])
+                          userInfo: [NSLocalizedDescriptionKey: "Failed to fetch Gemini API key from Worker (\(apiKeyURL.absoluteString)). Paste a key in the Pointera panel or check the Worker configuration."])
         }
 
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -722,12 +722,22 @@ final class GeminiLiveSession: ObservableObject {
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
             guard let self = self else { return }
 
-            // Skip work entirely while the model is speaking — macOS doesn't
-            // do echo cancellation on AVAudioEngine by default, and sending
-            // the speaker output back through the mic would trigger Gemini
-            // to interrupt itself in an infinite feedback loop.
-            let isSpeaking: Bool = self.modelSpeakingLock.withLock { self.modelSpeakingFlag }
-            guard !isSpeaking else { return }
+            // Skip work while the model is speaking OR while audio is still
+            // draining from the player queue. macOS AVAudioEngine has no
+            // hardware AEC, so capturing mic audio while the speaker is
+            // still rendering Gemini's voice sends that voice back to Gemini
+            // and triggers infinite self-interruption.
+            //
+            // isModelSpeaking (modelSpeakingFlag) turns false on turnComplete,
+            // but AVAudioPlayerNode may still have queued buffers rendering for
+            // tens of milliseconds after that event. We gate on BOTH flags so
+            // the tail-end of a Gemini utterance can't leak back into the mic.
+            // Short-circuit: if the event flag is already true, skip the
+            // second lock entirely — no point checking the buffer queue.
+            let isModelStillSpeakingViaEvent: Bool = self.modelSpeakingLock.withLock { self.modelSpeakingFlag }
+            guard !isModelStillSpeakingViaEvent else { return }
+            let isAudioStillDraining: Bool = self.audioPlayer.isPlaying
+            guard !isAudioStillDraining else { return }
 
             // Compute on audio thread — both are thread-safe CPU work.
             let powerLevel = Self.audioPowerLevel(from: buffer)

@@ -1,10 +1,10 @@
 //
 //  ScreenRecorder.swift
-//  TipTour
+//  PointPilot
 //
 //  Records the main display to an .mov file using ScreenCaptureKit +
 //  AVAssetWriter. Used by the workflow walkthrough feature to save a
-//  video the user can replay or share — TipTour shows them how, the
+//  video the user can replay or share — PointPilot shows them how, the
 //  recorder lets them keep it.
 //
 //  Design notes (lessons borrowed from a more complex recorder):
@@ -21,7 +21,7 @@
 //      combinations).
 //    • Our own overlay panel + menu bar UI are excluded from the
 //      capture via `SCContentFilter(display:excludingWindows:)`. Without
-//      this, the recording would show the cursor flying past TipTour's
+//      this, the recording would show the cursor flying past PointPilot's
 //      own UI in a meta-loop.
 //    • Writer state lives on a `@unchecked Sendable` `WriterContext` so
 //      sample-buffer callbacks (which arrive on a non-main queue) can
@@ -179,7 +179,7 @@ final class ScreenRecorder {
             in: .userDomainMask
         ).first!
         return appSupport
-            .appendingPathComponent("TipTour", isDirectory: true)
+            .appendingPathComponent("Pointera", isDirectory: true)
             .appendingPathComponent("recordings", isDirectory: true)
     }()
 
@@ -194,7 +194,7 @@ final class ScreenRecorder {
     /// queue → single ordered write path → no FIFO race against the
     /// writer.
     private let sampleBufferOutputQueue = DispatchQueue(
-        label: "tiptour.screenrecorder.output",
+        label: "pointpilot.screenrecorder.output",
         qos: .userInitiated
     )
 

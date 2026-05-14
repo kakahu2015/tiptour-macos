@@ -1,6 +1,6 @@
 //
 //  GeminiLiveClient.swift
-//  TipTour
+//  PointPilot
 //
 //  WebSocket client for Google's Gemini Live API. Single bidirectional
 //  streaming connection that handles voice input, vision input, voice
@@ -191,13 +191,13 @@ final class GeminiLiveClient: @unchecked Sendable {
                     ],
                     "steps": [
                         "type": "array",
-                        "description": "Ordered list of steps. First step MUST be visible on the current screen; later steps describe the path to take after clicking step 1. For text entry, prefer a type or setValue step with label as the target field and value as the exact text. If the field may not be focused, emit the target field label so TipTour can focus it before typing.",
+                        "description": "Ordered list of steps. First step MUST be visible on the current screen; later steps describe the path to take after clicking step 1. For text entry, prefer a type or setValue step with label as the target field and value as the exact text. If the field may not be focused, emit the target field label so Pointera can focus it before typing.",
                         "items": [
                             "type": "object",
                             "properties": [
                                 "label": [
                                     "type": "string",
-                                    "description": "For click: literal visible text of the element, or nearest label for an icon. For openApp: app name, e.g. 'Safari'. For openURL: URL/path, e.g. 'https://apple.com' or '/Users/me/Desktop'. For keyboardShortcut: combo. For type and setValue: REQUIRED — the visible name of the target input field, e.g. 'Search', 'Address and search bar', 'Message', 'Note body', 'Email', 'Password'. TipTour clicks this field to focus it before typing. Do NOT put the text-to-enter in label; text goes in value."
+                                    "description": "For click: literal visible text of the element, or nearest label for an icon. For openApp: app name, e.g. 'Safari'. For openURL: URL/path, e.g. 'https://apple.com' or '/Users/me/Desktop'. For keyboardShortcut: combo. For type and setValue: REQUIRED — the visible name of the target input field, e.g. 'Search', 'Address and search bar', 'Message', 'Note body', 'Email', 'Password'. PointPilot clicks this field to focus it before typing. Do NOT put the text-to-enter in label; text goes in value."
                                 ],
                                 "type": [
                                     "type": "string",
@@ -243,7 +243,7 @@ final class GeminiLiveClient: @unchecked Sendable {
                                 ],
                                 "targetContext": [
                                     "type": "string",
-                                    "description": "Optional grounding target for generic action steps. Use 'currentHighlight' when the user referred to the painted highlight/current highlighted area; use 'currentSelection' for a native selected text range; use 'focusedElement' for the active focused field; use 'visibleElement' for ordinary visible UI targets. This lets TipTour bind type/delete/setValue/click actions to the right app/window/element/range without relying on labels alone.",
+                                    "description": "Optional grounding target for generic action steps. Use 'currentHighlight' when the user referred to the painted highlight/current highlighted area; use 'currentSelection' for a native selected text range; use 'focusedElement' for the active focused field; use 'visibleElement' for ordinary visible UI targets. This lets Pointera bind type/delete/setValue/click actions to the right app/window/element/range without relying on labels alone.",
                                     "enum": [
                                         "visibleElement",
                                         "currentHighlight",

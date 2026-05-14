@@ -1,12 +1,12 @@
 //
 //  KeychainStore.swift
-//  TipTour
+//  PointPilot
 //
 //  Minimal Keychain helper for storing sensitive strings (like API keys)
 //  that shouldn't live in UserDefaults. Uses kSecClassGenericPassword —
 //  the standard macOS pattern for service-scoped secrets.
 //
-//  Scoped to TipTour's bundle identifier so the entries are isolated
+//  Scoped to PointPilot's bundle identifier so the entries are isolated
 //  from anything else on the system and auto-cleaned when the app is
 //  uninstalled. No iCloud sync — these are device-local keys only.
 //
@@ -16,7 +16,7 @@ import Security
 
 enum KeychainStore {
 
-    private static let serviceName: String = Bundle.main.bundleIdentifier ?? "com.milindsoni.tiptour"
+    private static let serviceName: String = Bundle.main.bundleIdentifier ?? "com.milindsoni.pointpilot"
 
     /// Write (or overwrite) a UTF-8 string for the given key. Returns
     /// true on success. Empty / whitespace-only input is treated as a
@@ -94,7 +94,7 @@ enum KeychainStore {
         return status == errSecSuccess || status == errSecItemNotFound
     }
 
-    // MARK: - TipTour-specific keys
+    // MARK: - PointPilot-specific keys
 
     /// Gemini API key the user has pasted directly into the app.
     /// Source builds require this local Keychain key. Distributed

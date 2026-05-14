@@ -128,21 +128,28 @@ final class ElementResolver: @unchecked Sendable {
         return nil
     }
 
-    /// Full resolution pipeline: AX → browser DOM/CDP → box_2d, tried in order
-    /// with early exit.
+    /// Full resolution pipeline.
     ///
-    /// Tier order is deliberate:
-    ///   1. AX tree first. Pixel-perfect when the app exposes one, and
-    ///      it's the only path that gives us a real element rect for
-    ///      the click detector to use as a tight hit region.
-    ///   2. Browser DOM/CDP coordinates for Chromium pages.
-    ///   3. Gemini's box_2d as final fallback. Those coordinates are
-    ///      the same model's spatial output for the same query — they
-    ///      reflect everything Gemini knew at tool-call time.
+    /// When Gemini provides box_2d the coordinate is used as the primary
+    /// spatial anchor — it reflects exactly what Gemini saw on-screen and
+    /// which element it intended to target. AX label-matching is unreliable
+    /// as a primary path for web/Electron content because many elements share
+    /// the same label text (e.g. a Chrome toolbar button and a page-level
+    /// button both titled "Google 搜索"), and AX picks whichever scores
+    /// higher on text similarity regardless of position.
     ///
-    /// If every tier misses, we return nil — the caller surfaces this
-    /// to the user rather than silently flying the cursor somewhere
-    /// wrong.
+    /// Resolution order when box_2d IS present:
+    ///   1. Convert box_2d to a global screen point.
+    ///   2. Find the smallest AX element whose frame contains that point
+    ///      (position-based snap — gives pixel-perfect center + hit rect).
+    ///   3. Fall back to the raw converted coordinate when no AX element
+    ///      covers the point (canvas apps, games, web layers).
+    ///
+    /// Resolution order when box_2d is NOT present:
+    ///   1. AX label match (fast, pixel-perfect for native apps).
+    ///   2. Multilingual AX fallback via worker semantic match.
+    ///   3. Browser DOM/CDP coordinates (Chromium page geometry).
+    ///   nil if nothing resolves.
     func resolve(
         label: String,
         llmHintInScreenshotPixels: CGPoint?,
@@ -151,10 +158,6 @@ final class ElementResolver: @unchecked Sendable {
         proximityAnchorInGlobalScreen: CGPoint? = nil
     ) async -> Resolution? {
 
-        // Staleness check on the screenshot — resolving against a frame
-        // >1s old means the cursor is likely to land on an element that
-        // has moved or disappeared. Log so it shows up in traces; don't
-        // block, because even a stale frame often works.
         if let capture = latestCapture {
             let ageSeconds = Date().timeIntervalSince(capture.captureTimestamp)
             if ageSeconds > 1.0 {
@@ -162,28 +165,42 @@ final class ElementResolver: @unchecked Sendable {
             }
         }
 
-        // 1. AX tree first — fastest and most reliable for native apps.
-        //    Target app hint lets us bypass the system's "frontmost" when
-        //    that's a background recorder (Cap) instead of the app the
-        //    user is actually working in (e.g. Blender).
-        //
-        //    Skip the walk entirely when we've already learned this app
-        //    has no AX tree (Blender/games/canvas apps). Saves 30-300ms
-        //    of wasted IPC on every subsequent pointing call and — more
-        //    importantly — the CPU that walk would burn while Gemini's
-        //    audio is streaming.
+        // ── Path A: box_2d present ──────────────────────────────────────
+        // Gemini's visual grounding is the most spatially accurate signal
+        // we have. Use the coordinate to find the element at that position
+        // rather than guessing by label.
+        if let hint = llmHintInScreenshotPixels, let capture = latestCapture {
+            let candidateScreenPoint = screenshotPixelToGlobalScreen(hint, capture: capture)
+
+            if !AccessibilityTreeResolver.isAppKnownToLackAXTree(hint: targetAppHint) {
+                if let snappedResolution = await snapToAXElementAtPoint(
+                    candidateScreenPoint,
+                    label: label,
+                    targetAppHint: targetAppHint,
+                    capture: capture
+                ) {
+                    return snappedResolution
+                }
+            }
+
+            // No AX element at that point — use the coordinate directly.
+            print("[ElementResolver] ✓ box_2d direct for \"\(label)\" → screenshotPixel=\(hint), screen=\(candidateScreenPoint)")
+            return Resolution(
+                globalScreenPoint: candidateScreenPoint,
+                displayFrame: capture.displayFrame,
+                label: label,
+                source: .llmRawCoordinates,
+                globalScreenRect: nil
+            )
+        }
+
+        // ── Path B: no box_2d — fall back to label-based lookup ─────────
+
         if !AccessibilityTreeResolver.isAppKnownToLackAXTree(hint: targetAppHint) {
             if let axResolution = await tryAccessibilityTree(label: label, targetAppHint: targetAppHint) {
                 return axResolution
             }
 
-            // Multilingual safety net: AX missed because the user's
-            // spoken language doesn't match the UI's display language
-            // (Gemini sometimes passes "Guardar" to a UI that has
-            // "Save", or vice versa). Pull the current AX label list
-            // and ask the worker which one matches semantically. Cheap
-            // (gemini-flash-lite, ~200ms) and only runs when the
-            // strict matcher already failed.
             if let translatedLabel = await translateLabelViaSemanticMatch(
                 originalLabel: label,
                 targetAppHint: targetAppHint
@@ -198,10 +215,6 @@ final class ElementResolver: @unchecked Sendable {
             }
         }
 
-        // 2. Browser DOM/CDP coordinates. Chrome and other Chromium
-        //    pages can expose better geometry through the page itself
-        //    than through the macOS AX tree, especially for template
-        //    cards and heavily styled web controls.
         if let browserResolution = await browserCoordinateResolver.resolve(
             label: label,
             targetAppHint: targetAppHint
@@ -220,24 +233,55 @@ final class ElementResolver: @unchecked Sendable {
             )
         }
 
-        guard let capture = latestCapture else {
-            print("[ElementResolver] ✗ no AX match and no screenshot capture — giving up on \"\(label)\"")
+        print("[ElementResolver] ✗ could not resolve \"\(label)\" — no box_2d and AX/browser missed")
+        return nil
+    }
+
+    // MARK: - Position-Based AX Snap
+
+    /// Given a screen point from box_2d, find the smallest AX element whose
+    /// frame contains that point and snap the click to its center.
+    ///
+    /// "Smallest" means we prefer the leaf element that most tightly wraps
+    /// the coordinate over a large ancestor container. This avoids snapping
+    /// to e.g. the entire web content area instead of the specific button.
+    ///
+    /// The 120pt distance cap guards against huge container elements whose
+    /// center drifts far from the original box_2d coordinate — in that case
+    /// the raw box_2d coordinate is more accurate than the element center.
+    private func snapToAXElementAtPoint(
+        _ globalScreenPoint: CGPoint,
+        label: String,
+        targetAppHint: String?,
+        capture: CompanionScreenCapture
+    ) async -> Resolution? {
+        let axResolverRef = axResolver
+        let axResult = await Task.detached(priority: .userInitiated) {
+            axResolverRef.findElementContainingPoint(globalScreenPoint, targetAppHint: targetAppHint)
+        }.value
+
+        guard let axResult else { return nil }
+
+        let distanceFromBoxPoint = hypot(
+            axResult.center.x - globalScreenPoint.x,
+            axResult.center.y - globalScreenPoint.y
+        )
+        guard distanceFromBoxPoint < 120 else {
+            print("[ElementResolver] AX snap skipped — element center \(String(format:"%.0f",distanceFromBoxPoint))pt from box_2d, using raw coords for \"\(label)\"")
             return nil
         }
 
-        // 3. Trust the model's box_2d when it gave us one. This is
-        //    Gemini's spatial output for the same query that emitted
-        //    the label — one model, one decision.
-        if let hint = llmHintInScreenshotPixels {
-            return rawLLMCoordinate(
-                label: label,
-                llmHintInScreenshotPixels: hint,
-                capture: capture
-            )
+        let displayFrame = await MainActor.run {
+            displayFrameContaining(axResult.center) ?? capture.displayFrame
         }
-
-        print("[ElementResolver] ✗ could not resolve \"\(label)\" — AX missed and no box_2d hint")
-        return nil
+        print("[ElementResolver] ✓ box_2d+AX snap \"\(label)\" → \"\(axResult.title)\" [\(axResult.role)] at \(axResult.center) (box_2d was \(globalScreenPoint))")
+        return Resolution(
+            globalScreenPoint: axResult.center,
+            displayFrame: displayFrame,
+            label: label,
+            source: .accessibilityTree,
+            globalScreenRect: axResult.screenFrame
+        )
     }
 
     // MARK: - Multilingual Fallback
