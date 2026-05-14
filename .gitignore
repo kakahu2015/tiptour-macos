@@ -11,3 +11,6 @@ build/
 releases/
 *.xcarchive/
 *.dmg
+
+# OmniParser conversion — downloaded weights cache, not source
+scripts/weights_cache/

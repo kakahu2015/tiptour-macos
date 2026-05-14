@@ -4,14 +4,17 @@
 //
 //  Single entry point for "where on screen should the cursor fly to?"
 //
-//  Tries three lookup strategies in order of reliability:
+//  Tries four lookup strategies in order of reliability:
 //    1. macOS Accessibility tree (~30ms, pixel-perfect when the app
 //       supports AX — almost all native Mac apps, most Cocoa third-party
 //       apps, and Electron apps that respect AXManualAccessibility).
 //    2. Browser DOM coordinates through CUA/CDP for Chromium web pages.
-//    3. Raw Gemini-emitted box_2d coordinates as the absolute fallback.
-//       These come from the same model that named the element, so they
-//       reflect Gemini's spatial intent for that exact tool call.
+//    3. box_2d + AX snap — Gemini's spatial coordinate snapped to the
+//       smallest AX element covering that point (pixel-perfect center).
+//    4. Local YOLO+OCR — on-device OmniParser detection when AX is weak
+//       (canvas apps, games, Figma, custom Electron surfaces). No network
+//       call — runs entirely on the Neural Engine via CoreML.
+//    5. Raw Gemini box_2d — absolute last resort when nothing else resolves.
 //
 //  The resolver returns a global AppKit screen coordinate so the cursor
 //  overlay can fly to it without further conversion.
@@ -34,6 +37,7 @@ final class ElementResolver: @unchecked Sendable {
     enum ResolutionSource {
         case accessibilityTree       // AX tree gave us exact frame
         case browserDOMCoordinates   // Browser DOM rect through CUA/CDP
+        case localYOLODetection      // On-device OmniParser YOLO + Apple Vision OCR
         case llmRawCoordinates       // Straight from Gemini's box_2d, no refinement
     }
 
@@ -233,8 +237,44 @@ final class ElementResolver: @unchecked Sendable {
             )
         }
 
-        print("[ElementResolver] ✗ could not resolve \"\(label)\" — no box_2d and AX/browser missed")
+        // ── Local YOLO+OCR (on-device OmniParser) ───────────────────────
+        // Runs when AX and browser DOM both miss — common for canvas-heavy
+        // apps (Figma, Blender, games) that expose little or no AX tree.
+        // Entirely on-device: CoreML YOLO detection + Apple Vision OCR,
+        // no screenshot sent to any remote endpoint.
+        if let capture = latestCapture,
+           let screenshotCGImage = cgImageFromJPEGData(capture.imageData) {
+            if let yoloMatch = try? await LocalUIDetector.shared.findBestMatch(
+                queryLabel: label,
+                in: screenshotCGImage,
+                capture: capture,
+                proximityAnchorInGlobalScreen: proximityAnchorInGlobalScreen
+            ) {
+                let displayFrame = await MainActor.run {
+                    displayFrameContaining(yoloMatch.globalScreenCenter)
+                        ?? capture.displayFrame
+                }
+                print("[ElementResolver] ✓ YOLO+OCR resolved \"\(label)\" → \"\(yoloMatch.ocrLabel)\" at \(yoloMatch.globalScreenCenter)")
+                return Resolution(
+                    globalScreenPoint: yoloMatch.globalScreenCenter,
+                    displayFrame: displayFrame,
+                    label: yoloMatch.ocrLabel.isEmpty ? label : yoloMatch.ocrLabel,
+                    source: .localYOLODetection,
+                    globalScreenRect: yoloMatch.globalScreenRect
+                )
+            }
+        }
+
+        print("[ElementResolver] ✗ could not resolve \"\(label)\" — AX, browser, and YOLO all missed")
         return nil
+    }
+
+    // MARK: - Image Utilities (shared)
+
+    /// Decode JPEG data from a CompanionScreenCapture into a CGImage for YOLO input.
+    private func cgImageFromJPEGData(_ jpegData: Data) -> CGImage? {
+        guard let imageSource = CGImageSourceCreateWithData(jpegData as CFData, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
     }
 
     // MARK: - Position-Based AX Snap
