@@ -271,7 +271,9 @@ struct CompanionPanelView: View {
                     Text("Accessibility")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(DS.Colors.textSecondary)
-                    Text("So I can move the cursor and read what's on screen.")
+                    Text(isGranted
+                         ? "So I can move the cursor and read what's on screen."
+                         : "Quit and reopen after granting.")
                         .font(.system(size: 10))
                         .foregroundColor(DS.Colors.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)

@@ -36,28 +36,16 @@ class WindowPositionManager {
         AXIsProcessTrusted()
     }
 
-    /// Presents exactly one permission path per tap: the system prompt on the first
-    /// attempt, then System Settings on later attempts after macOS has already shown
-    /// its one-time alert.
+    /// Opens System Settings to the Accessibility pane and reveals the app in Finder
+    /// so the user can drag it into the list. In development builds the app path changes
+    /// on every Xcode build (DerivedData hash changes), which revokes the old entry —
+    /// opening Finder alongside Settings lets the user re-add the new path in one step.
     @discardableResult
     static func requestAccessibilityPermission() -> PermissionRequestPresentationDestination {
-        let presentationDestination = permissionRequestPresentationDestination(
-            hasPermissionNow: hasAccessibilityPermission(),
-            hasAttemptedSystemPrompt: hasAttemptedAccessibilitySystemPromptDuringCurrentLaunch
-        )
-
-        switch presentationDestination {
-        case .alreadyGranted:
-            return .alreadyGranted
-        case .systemPrompt:
-            hasAttemptedAccessibilitySystemPromptDuringCurrentLaunch = true
-            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
-            _ = AXIsProcessTrustedWithOptions(options)
-        case .systemSettings:
-            openAccessibilitySettings()
-        }
-
-        return presentationDestination
+        guard !hasAccessibilityPermission() else { return .alreadyGranted }
+        revealAppInFinder()
+        openAccessibilitySettings()
+        return .systemSettings
     }
 
     /// Opens System Settings to the Accessibility pane.

@@ -191,7 +191,38 @@ final class LocalUIDetector: @unchecked Sendable {
             return lhs.detectionConfidence > rhs.detectionConfidence
         }
 
-        let best = sortedCandidates.first!
+        var best = sortedCandidates.first!
+
+        // When Apple Vision merges several adjacent menu items into one text
+        // block (e.g. "File Edit View" for a macOS menu bar), the match score
+        // is high (substring hit) but the box center is nowhere near the
+        // target item. Narrow the click point to where the matching substring
+        // actually sits within the bounding box, using proportional char offsets.
+        let queryLower = queryLabel.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let labelLower = best.ocrLabel.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if labelLower != queryLower,
+           labelLower.contains(queryLower),
+           let range = labelLower.range(of: queryLower) {
+            let totalLength = labelLower.count
+            if totalLength > 0 {
+                let startOffset = labelLower.distance(from: labelLower.startIndex, to: range.lowerBound)
+                let endOffset   = labelLower.distance(from: labelLower.startIndex, to: range.upperBound)
+                let startFraction = CGFloat(startOffset) / CGFloat(totalLength)
+                let endFraction   = CGFloat(endOffset)   / CGFloat(totalLength)
+                let fullRect = best.globalScreenRect
+                let narrowedX     = fullRect.origin.x + fullRect.width * startFraction
+                let narrowedWidth = fullRect.width * (endFraction - startFraction)
+                let narrowedRect  = CGRect(x: narrowedX, y: fullRect.origin.y,
+                                           width: narrowedWidth, height: fullRect.height)
+                best = DetectedElement(
+                    globalScreenRect: narrowedRect,
+                    ocrLabel: best.ocrLabel,
+                    detectionConfidence: best.detectionConfidence,
+                    labelMatchScore: best.labelMatchScore
+                )
+            }
+        }
+
         print("[LocalUIDetector] ✓ matched \"\(queryLabel)\" → \"\(best.ocrLabel)\" score=\(String(format: "%.2f", best.labelMatchScore)) at \(best.globalScreenCenter)")
         return best
     }

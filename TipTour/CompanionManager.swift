@@ -720,7 +720,10 @@ final class CompanionManager: ObservableObject {
             globalHighlightShortcutMonitor.stop()
         }
 
-        hasScreenRecordingPermission = WindowPositionManager.hasScreenRecordingPermission()
+        // Use the false-negative-safe check: CGPreflightScreenCaptureAccess() can return
+        // false even after the user granted permission (known macOS bug). The safe variant
+        // falls back to the last-confirmed UserDefaults state so the UI stays "Granted".
+        hasScreenRecordingPermission = WindowPositionManager.shouldTreatScreenRecordingPermissionAsGrantedForSessionLaunch()
 
         let micAuthStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         hasMicrophonePermission = micAuthStatus == .authorized

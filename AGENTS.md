@@ -7,14 +7,14 @@
 
 macOS menu bar voice companion. Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel. Push-to-talk (Ctrl+Option) opens a Gemini Live realtime session — Gemini hears the user, sees the user's screen via streaming JPEG screenshots, replies in voice, and calls one CUA action-plan tool to control the computer in Autopilot.
 
-Source builds require the user to paste their own Gemini API key into the visible panel field; the key is stored in macOS Keychain. Distributed builds can optionally configure a Cloudflare Worker proxy via `TipTourWorkerBaseURL`, but the maintainer's Worker URL must never be hardcoded into the open-source app.
+Source builds require the user to paste their own Gemini API key into the visible panel field; the key is stored in macOS Keychain.
 
 ## Architecture
 
 - **App Type**: Menu bar-only (`LSUIElement=true`), no dock icon or main window.
 - **Framework**: SwiftUI (macOS native) with AppKit bridging for menu bar panel and cursor overlay.
 - **Pattern**: MVVM with `@StateObject` / `@Published` state management.
-- **Voice Mode**: Gemini Live only. Single-model realtime WebSocket — bidirectional voice (PCM16 16kHz in, PCM16 24kHz out), vision (JPEG screenshots), text transcription, AND tool calling all in one streaming connection. One tool is exposed: `submit_workflow_plan(goal, app, steps)` for CUA action plans. The legacy `point_at_element` path is disabled and no longer declared to Gemini. Workflow steps can include `targetContext` (`visibleElement`, `currentHighlight`, `currentSelection`, `focusedElement`) so Gemini can bind actions to the highlighted/selected/focused target generically instead of smuggling target intent through a click label. Gemini produces action plans itself inside its tool call — no separate planner model. API key comes from the user's local Keychain key in source builds, with optional Worker fallback only when `TipTourWorkerBaseURL` is configured. `CompanionManager` constructs the session directly — no protocol indirection (the previous OpenAI Realtime backend + `VoiceBackend` protocol were removed in the simplification refactor).
+- **Voice Mode**: Gemini Live only. Single-model realtime WebSocket — bidirectional voice (PCM16 16kHz in, PCM16 24kHz out), vision (JPEG screenshots), text transcription, AND tool calling all in one streaming connection. One tool is exposed: `submit_workflow_plan(goal, app, steps)` for CUA action plans. The legacy `point_at_element` path is disabled and no longer declared to Gemini. Workflow steps can include `targetContext` (`visibleElement`, `currentHighlight`, `currentSelection`, `focusedElement`) so Gemini can bind actions to the highlighted/selected/focused target generically instead of smuggling target intent through a click label. Gemini produces action plans itself inside its tool call — no separate planner model. API key comes from the user's local Keychain key in source builds. `CompanionManager` constructs the session directly — no protocol indirection (the previous OpenAI Realtime backend + `VoiceBackend` protocol were removed in the simplification refactor).
 - **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support.
 - **Voice Input**: `GeminiLiveSession` captures mic audio and streams it directly over the WebSocket. Hotkey is a listen-only CGEvent tap so modifier-only shortcuts (Ctrl+Option) work reliably in the background.
 - **Focus Highlight Context**: Holding Ctrl+Shift activates a listen-only freeform highlight brush. `GlobalHighlightShortcutMonitor` records the mouse path, `OverlayWindow` renders the translucent stroke, and `CompanionManager` sends Gemini a `FocusHighlightContext` with the global rect, last painted hover point, topmost CUA window intersecting the painted region, AX element under the highlight, active selected text when it belongs to the highlighted element/window, and normalized screenshot `box_2d` when available. If the highlight intersects a text element but the user did not make a native macOS selection, TipTour asks AX for `AXRangeForPosition` at sampled painted points and expands the result to the highlighted word/range. The preferred tool-call shape is now generic: Gemini marks edit steps with `targetContext: "currentHighlight"` or `targetContext: "currentSelection"`, and `CompanionManager` binds that context to the available resolver (AX text range today, other target resolvers later). The intersected app is also pinned as the target app for follow-up workflows so commands like "rewrite this" or "change this area" stay inside the app/window the user highlighted instead of typing into whatever is frontmost later.
@@ -31,17 +31,6 @@ Source builds require the user to paste their own Gemini API key into the visibl
 - **Walkthrough recording**: `ScreenRecorder.swift` saves the user's walkthrough as an `.mov` to `~/Library/Application Support/TipTour/recordings/`. ScreenCaptureKit + AVAssetWriter, H.264 primary with HEVC fallback, 16-aligned dimensions for codec compatibility, serial sample-buffer queue to preserve FIFO ordering through the writer.
 - **Concurrency**: `@MainActor` isolation, async/await throughout.
 - **Analytics**: PostHog via `TipTourAnalytics.swift`.
-
-### API Proxy (Cloudflare Worker)
-
-Source builds call Gemini directly with the user's Keychain-stored API key. A Cloudflare Worker (`worker/src/index.ts`) is optional for distribution builds that set `TipTourWorkerBaseURL` in the app bundle.
-
-| Route | Upstream | Purpose |
-|-------|----------|---------|
-| `GET /gemini-live-key` | — (returns secret) | Optional distribution-build route that returns a Gemini API key so the app can open a direct WebSocket to Gemini Live. |
-| `POST /match-label` | `gemini-2.5-flash-lite` | Multilingual label matcher used by `ElementResolver`'s fallback when the LLM passes a label in one language and the AX tree has it in another. |
-
-Worker secret: `GEMINI_API_KEY`.
 
 ### Key Architecture Decisions
 
@@ -88,7 +77,6 @@ Worker secret: `GEMINI_API_KEY`.
 | `TipTourAnalytics.swift` | ~106 | PostHog analytics integration for usage tracking. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
-| `worker/src/index.ts` | ~140 | Cloudflare Worker proxy. Two routes: `/gemini-live-key` (Gemini Live API key) and `/match-label` (multilingual label matcher). |
 
 ## Build & Run
 
@@ -103,22 +91,6 @@ open tiptour-macos.xcodeproj
 ```
 
 **Do NOT run `xcodebuild` from the terminal** — it invalidates TCC (Transparency, Consent, and Control) permissions and the app will need to re-request screen recording, accessibility, etc.
-
-## Cloudflare Worker
-
-```bash
-cd worker
-npm install
-
-# Add secret
-npx wrangler secret put GEMINI_API_KEY
-
-# Deploy
-npx wrangler deploy
-
-# Local dev (create worker/.dev.vars with GEMINI_API_KEY=...)
-npx wrangler dev
-```
 
 ## Code Style & Conventions
 

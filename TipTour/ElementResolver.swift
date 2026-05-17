@@ -187,7 +187,57 @@ final class ElementResolver: @unchecked Sendable {
                 }
             }
 
-            // No AX element at that point — use the coordinate directly.
+            // AX missed (canvas app, game, Figma, Blender). Try YOLO to snap
+            // the LLM hint to the actual element center — but only when confident:
+            //   1. A YOLO box contains the hint point → use smallest containing box.
+            //   2. A label-matched box is within 200px → use closest such box.
+            //   3. Neither → fall through to raw LLM coordinate; a blind nearest-
+            //      box snap would silently land on a menu sibling 25–30px away.
+            if let screenshotCGImage = cgImageFromJPEGData(capture.imageData),
+               let allElements = try? await LocalUIDetector.shared.detectElements(
+                   in: screenshotCGImage, capture: capture),
+               !allElements.isEmpty {
+
+                // 1. Smallest YOLO box that contains the hint screen point
+                let containingBoxes = allElements.filter { $0.globalScreenRect.contains(candidateScreenPoint) }
+                if let tightestBox = containingBoxes.min(by: { $0.globalScreenRect.width * $0.globalScreenRect.height < $1.globalScreenRect.width * $1.globalScreenRect.height }) {
+                    let displayFrame = await MainActor.run { displayFrameContaining(tightestBox.globalScreenCenter) ?? capture.displayFrame }
+                    print("[ElementResolver] ✓ YOLO box_2d snap (containing) \"\(label)\" → \"\(tightestBox.ocrLabel)\" at \(tightestBox.globalScreenCenter)")
+                    return Resolution(
+                        globalScreenPoint: tightestBox.globalScreenCenter,
+                        displayFrame: displayFrame,
+                        label: tightestBox.ocrLabel.isEmpty ? label : tightestBox.ocrLabel,
+                        source: .localYOLODetection,
+                        globalScreenRect: tightestBox.globalScreenRect
+                    )
+                }
+
+                // 2. Label-matched box within 200px of hint
+                let labelMatchSearchRadius: CGFloat = 200
+                let queryLower = label.lowercased()
+                let labelMatchedCandidates: [(element: LocalUIDetector.DetectedElement, distance: CGFloat)] = allElements.compactMap { element in
+                    let dx = element.globalScreenCenter.x - candidateScreenPoint.x
+                    let dy = element.globalScreenCenter.y - candidateScreenPoint.y
+                    let distance = sqrt(dx * dx + dy * dy)
+                    guard distance <= labelMatchSearchRadius else { return nil }
+                    let ocrLower = element.ocrLabel.lowercased()
+                    guard ocrLower.contains(queryLower) || queryLower.contains(ocrLower), !ocrLower.isEmpty else { return nil }
+                    return (element, distance)
+                }
+                if let best = labelMatchedCandidates.min(by: { $0.distance < $1.distance }) {
+                    let displayFrame = await MainActor.run { displayFrameContaining(best.element.globalScreenCenter) ?? capture.displayFrame }
+                    print("[ElementResolver] ✓ YOLO box_2d snap (label+200px) \"\(label)\" → \"\(best.element.ocrLabel)\" at \(best.element.globalScreenCenter)")
+                    return Resolution(
+                        globalScreenPoint: best.element.globalScreenCenter,
+                        displayFrame: displayFrame,
+                        label: best.element.ocrLabel.isEmpty ? label : best.element.ocrLabel,
+                        source: .localYOLODetection,
+                        globalScreenRect: best.element.globalScreenRect
+                    )
+                }
+            }
+
+            // No AX element and no confident YOLO snap — use the LLM coordinate directly.
             print("[ElementResolver] ✓ box_2d direct for \"\(label)\" → screenshotPixel=\(hint), screen=\(candidateScreenPoint)")
             return Resolution(
                 globalScreenPoint: candidateScreenPoint,
